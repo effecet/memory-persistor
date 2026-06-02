@@ -1,0 +1,15 @@
+.env
+.env.supabase
+!.env.example
+!.env.supabase.example
+node_modules/
+dist/
+*.log
+backups/
+backup/db/
+drizzle/meta/
+.DS_Store
+.mcp.json*
+__pycache__/
+.pytest_cache/
+.claude/
