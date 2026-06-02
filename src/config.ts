@@ -50,7 +50,6 @@ export const TIER_WARM = 0.3;
 // ── Paths ──────────────────────────────────────────────────────────────────
 export const CLAUDE_DIR = process.env.CLAUDE_DIR || `${process.env.HOME}/.claude`;
 export const MEMORY_PERSISTOR_DIR = process.env.MEMORY_PERSISTOR_DIR || process.cwd();
-export const BACKUPS_DIR = `${MEMORY_PERSISTOR_DIR}/backups`;
 
 // ── Retrieval defaults ─────────────────────────────────────────────────────
 export const DEFAULT_RECALL_LIMIT = 10;

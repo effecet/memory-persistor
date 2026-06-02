@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Memory decay + snapshot script.
-Called by ~/.claude/session_start.py via memory_decay().
+Run on session start or via cron to age out stale memories.
 
 1. Decays temperature on entities not accessed in 24h
 2. Exports JSON snapshots to backups/
-3. Prunes to last 30 snapshots
+3. Prunes to the last MAX_SNAPSHOTS snapshots
 """
 
 import json
@@ -160,7 +160,7 @@ def main() -> None:
     # 3. Prune
     pruned = prune_snapshots()
 
-    # Output for session_start.py to capture
+    # Human-readable summary line (captured by the caller, if any)
     parts = [f"🧊 Memory decay: {stale_count} entities cooled"]
     if pruned:
         parts.append(f", {pruned} old snapshots pruned")

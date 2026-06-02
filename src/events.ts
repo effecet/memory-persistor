@@ -29,8 +29,7 @@ export type EventType =
  * stderr so a broken insert pipeline is visible on the next MCP restart
  * instead of taking the freshness canary to surface.
  *
- * stdout is reserved for the MCP transport (per
- * `~/.claude/rules/typescript.md` § MCP Server Patterns).
+ * stdout is reserved for the MCP transport, so all logging goes to stderr.
  */
 export function logEvent(
   eventType: EventType,
