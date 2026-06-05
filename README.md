@@ -16,6 +16,10 @@ Docker container.
 > A reusable scaffold. Point it at your own Postgres, run the migrations, and wire
 > it into your MCP client.
 
+> 🛠️ **Companion:** [claude-craft-kit](https://github.com/effecet/claude-craft-kit) — an
+> opinionated Claude Code workflow harness (pre-tool guards · a tiered validation gate ·
+> a wrap-up gate) that wires this in as its optional long-term memory backend.
+
 ## Quick Start
 
 ```bash
