@@ -20,6 +20,7 @@ import { recall, recallByIds } from './retrieve.js';
 import { bump } from './thermal.js';
 import { syncToFile, removeFile, syncMerge } from './file-sync.js';
 import { MEMORY_TYPES, STATUS_TOP_N, AUTO_RELATE_THRESHOLD, AUTO_RELATE_LIMIT } from './config.js';
+import { embedForWrite, warmEmbed, resolveEmbeddingForTextChange } from './embed.js';
 import { traverse, detectRelationType, isValidRelationType, RELATION_TYPES } from './graph.js';
 import {
   findDedupCandidates,
@@ -37,6 +38,22 @@ const server = new McpServer({
   version: '1.0.0',
 });
 
+// Row shape needed for markdown sync (file-sync.ts's MemoryEntity) — excludes
+// embedding (384 floats), which syncToFile/syncMerge/removeFile never read.
+// Shared by forget, update, and merge's re-reads below.
+const SYNC_COLUMNS = {
+  id: entities.id,
+  name: entities.name,
+  type: entities.type,
+  observations: entities.observations,
+  temperature: entities.temperature,
+  tier: entities.tier,
+  source: entities.source,
+  importance: entities.importance,
+  accessCount: entities.accessCount,
+  originHost: entities.originHost,
+};
+
 // ── remember ───────────────────────────────────────────────────────────────
 
 server.tool(
@@ -53,6 +70,7 @@ server.tool(
   },
   async ({ name, type, observations, tags, importance, source, relatedTo }) => {
     const entitySource = source || process.env.MEMORY_PERSISTOR_DIR || process.cwd();
+    const embedding = await embedForWrite(name, observations);
 
     const [entity] = await db
       .insert(entities)
@@ -67,14 +85,15 @@ server.tool(
         tier: 'HOT',
         accessCount: 0,
         originHost: hostname(),
+        embedding,
       })
-      .returning();
+      .returning({ id: entities.id, name: entities.name });
 
     // Dual-write to markdown
     syncToFile({
       id: entity.id,
       name: entity.name,
-      type: entity.type,
+      type,
       observations: observations || '',
       temperature: 1.0,
       tier: 'HOT',
@@ -102,6 +121,12 @@ server.tool(
       const autoRelatedRes = await recall({
         query: `${name} ${(observations || '').slice(0, 200)}`,
         limit: AUTO_RELATE_LIMIT,
+        // embedForWrite already embedded this same text a few lines up for the
+        // write-path vector — a second embedForQuery call here would be pure
+        // redundant inference, and would force ad-hoc (write-disabled)
+        // machines to load the ONNX runtime on every remember, not just on an
+        // explicit recall (see RecallOptions.skipSemantic).
+        skipSemantic: true,
       });
       const autoRelated = autoRelatedRes.results;
 
@@ -229,7 +254,7 @@ server.tool(
   async ({ id }) => {
     // Fetch entity for file removal before deleting
     const [entity] = await db
-      .select()
+      .select(SYNC_COLUMNS)
       .from(entities)
       .where(eq(entities.id, id))
       .limit(1);
@@ -297,6 +322,33 @@ server.tool(
       };
     }
 
+    // Embedding text is name+observations — recompute only when
+    // either changed. resolveEmbeddingForTextChange decides invalidate (gate
+    // off) vs recompute vs preserve-on-transient-failure (undefined = leave
+    // updates.embedding unset, so the column is untouched).
+    if (name !== undefined || observations !== undefined) {
+      let embedName = name;
+      let embedObservations: string | null | undefined = observations;
+      if (embedName === undefined || embedObservations === undefined) {
+        // Only one of the two changed — fetch the current row for the other half.
+        const [existing] = await db
+          .select({ name: entities.name, observations: entities.observations })
+          .from(entities)
+          .where(eq(entities.id, id))
+          .limit(1);
+        if (existing) {
+          embedName ??= existing.name;
+          embedObservations ??= existing.observations;
+        }
+      }
+      if (embedName !== undefined) {
+        const embedding = await resolveEmbeddingForTextChange(embedName, embedObservations);
+        if (embedding !== undefined) {
+          updates.embedding = embedding;
+        }
+      }
+    }
+
     // Snapshot current state before applying changes
     try {
       await snapshotVersion(id);
@@ -308,7 +360,7 @@ server.tool(
       .update(entities)
       .set(updates)
       .where(eq(entities.id, id))
-      .returning();
+      .returning({ id: entities.id });
 
     if (!updated) {
       return {
@@ -321,7 +373,7 @@ server.tool(
 
     // Re-read to get post-bump state for accurate markdown sync
     const [current] = await db
-      .select()
+      .select(SYNC_COLUMNS)
       .from(entities)
       .where(eq(entities.id, id))
       .limit(1);
@@ -593,7 +645,7 @@ server.tool(
       // Source row is deleted by mergeMemories — capture identity first so its
       // markdown orphan can be cleared (issue #15).
       const [src] = await db
-        .select()
+        .select(SYNC_COLUMNS)
         .from(entities)
         .where(eq(entities.id, sourceId))
         .limit(1);
@@ -604,7 +656,7 @@ server.tool(
 
       // Re-read target for file sync
       const [current] = await db
-        .select()
+        .select(SYNC_COLUMNS)
         .from(entities)
         .where(eq(entities.id, targetId))
         .limit(1);
@@ -726,6 +778,11 @@ server.tool(
 async function main() {
   // Verify database connectivity before accepting tool calls
   await db.execute(sql`SELECT 1`);
+
+  // Fire-and-forget: warmEmbed() runs unconditionally (every machine embeds
+  // recall queries regardless of EMBED_ON_WRITE_ENABLED) and is already
+  // non-fatal internally; boot must not block on the ~1-2s first model load.
+  warmEmbed();
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

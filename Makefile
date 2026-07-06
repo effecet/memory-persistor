@@ -1,4 +1,4 @@
-.PHONY: help install up down rebuild migrate seed dev dev-remote test test-integration status status-remote decay decay-remote canary canary-remote cron-status graph clean
+.PHONY: help install up down rebuild migrate seed dev dev-remote test test-integration status status-remote decay decay-remote backfill-embeddings backfill-embeddings-remote canary canary-remote cron-status graph clean
 
 DOCKER_COMPOSE = docker compose
 MCP_SERVER = npx tsx src/mcp-server.ts
@@ -69,6 +69,13 @@ decay: ## Run thermal decay + snapshot manually (local Docker)
 decay-remote: ## Run thermal decay against Supabase
 	@test -f .env.supabase || (echo "Missing .env.supabase" && exit 1)
 	. ./.env.supabase && DATABASE_URL="$$DATABASE_URL" npx tsx -e "import { decayAll } from './src/thermal.js'; const r = await decayAll(); console.log('Decayed', r.count, 'entities, synced', r.synced); process.exit(0);"
+
+backfill-embeddings: ## Backfill NULL embeddings (local Docker). Add ARGS=--dry-run for a count only
+	npx tsx scripts/backfill-embeddings.ts $(ARGS)
+
+backfill-embeddings-remote: ## Backfill NULL embeddings against a managed instance. Add ARGS=--dry-run for a count only
+	@test -f .env.supabase || (echo "Missing .env.supabase" && exit 1)
+	. ./.env.supabase && DATABASE_URL="$$DATABASE_URL" npx tsx scripts/backfill-embeddings.ts $(ARGS)
 
 canary: ## Check events pipeline freshness (local Docker); exits 1 if stale
 	python3 scripts/events_canary.py

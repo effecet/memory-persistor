@@ -1,17 +1,18 @@
 /**
- * Phase 1 TDD tests: v2 scoring config.
+ * Tests for the hybrid retrieval scoring-weight config.
  *
- * V2 expands from 4 to 8 scoring signals.
- * Expected to FAIL until Phase 1 config changes are made.
+ * Nine scoring signals (the two lexical signals plus a semantic vector signal
+ * and six others); all weights must sum to 1.0.
  */
 import { describe, it, expect } from 'vitest';
 import { SCORING_WEIGHTS } from '../src/config.js';
 
-describe('v2 scoring weights', () => {
-  it('has all 8 scoring signals', () => {
+describe('scoring weights', () => {
+  it('has all 9 scoring signals', () => {
     const w = SCORING_WEIGHTS as Record<string, number>;
     expect(w.textRank).toBeDefined();
     expect(w.trigramSimilarity).toBeDefined();
+    expect(w.semanticSimilarity).toBeDefined();
     expect(w.tagMatch).toBeDefined();
     expect(w.temperature).toBeDefined();
     expect(w.importance).toBeDefined();
@@ -20,11 +21,12 @@ describe('v2 scoring weights', () => {
     expect(w.accessFrequency).toBeDefined();
   });
 
-  it('all 8 weights sum to 1.0', () => {
+  it('all 9 weights sum to 1.0', () => {
     const w = SCORING_WEIGHTS as Record<string, number>;
     const sum =
       (w.textRank ?? 0) +
       (w.trigramSimilarity ?? 0) +
+      (w.semanticSimilarity ?? 0) +
       (w.tagMatch ?? 0) +
       (w.temperature ?? 0) +
       (w.importance ?? 0) +

@@ -12,6 +12,7 @@ import {
   boolean,
   jsonb,
   index,
+  vector,
 } from 'drizzle-orm/pg-core';
 
 // ── Entities (memories) ────────────────────────────────────────────────────
@@ -32,6 +33,10 @@ export const entities = pgTable('entities', {
   lastAccessedAt: timestamp('last_accessed_at', { withTimezone: true }).defaultNow(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   stale: boolean('stale').default(false),
+  // Semantic embedding (bge-small-en-v1.5, fp32, 384-d, L2-normalized). Nullable:
+  // write-disabled machines write NULL (dev-only-embed) and a primary backfills.
+  // No ANN index — exact brute-force cosine (`<=>`) is sub-ms at this corpus size.
+  embedding: vector('embedding', { dimensions: 384 }),
 }, (table) => [
   index('idx_entities_type').on(table.type),
   index('idx_entities_temperature').on(table.temperature),

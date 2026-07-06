@@ -9,7 +9,8 @@
 [![🧠 thermal memory](https://img.shields.io/badge/%F0%9F%A7%A0-thermal%20memory-7C3AED)](./src/thermal.ts)
 
 A PostgreSQL-backed **MCP memory server** with thermal decay, a knowledge graph,
-and 8-signal hybrid retrieval — a long-term memory for AI agents (e.g. Claude
+and 9-signal hybrid retrieval — including **local semantic embeddings** (bge-small
+via ONNX, in-process, offline) — a long-term memory for AI agents (e.g. Claude
 Code). Runs against any Postgres: a managed cloud instance (Supabase) or a local
 Docker container.
 
@@ -41,7 +42,7 @@ The server exposes these tools to an MCP client:
 | Tool | Purpose |
 |------|---------|
 | `remember` | Store a memory with tags, type, importance — auto-relates to top-3 FTS matches, dedup-checks |
-| `recall` | 8-signal hybrid search (FTS + trigram + temperature + importance + graph centrality + recency + access frequency) |
+| `recall` | 9-signal hybrid search (FTS + trigram + **semantic vector** + temperature + importance + graph centrality + recency + access frequency) |
 | `forget` | Delete a memory, cascade its relations, remove the synced markdown file |
 | `update` | Partial update with automatic version snapshot before changes |
 | `relate` | Create typed edges: `related_to`, `supersedes`, `contradicts`, `elaborates`, `depends_on` |
@@ -52,7 +53,7 @@ The server exposes these tools to an MCP client:
 | `merge` | Combine duplicates — append observations, union tags, transfer edges |
 | `conflicts` | List all `contradicts` edge pairs |
 | `analytics` | Recall hit rate, top accessed, temperature distribution, events/day, graph density |
-| `health` | Orphan count, stale count, dedup candidate pairs (similarity scores + proposed canonical), contradictions, type coverage |
+| `health` | Orphan count, stale count, **cosine near-duplicate pairs** (similarity scores + proposed canonical), contradictions, type coverage |
 
 ### Memory Types
 
@@ -65,14 +66,16 @@ graph TD
     CC[MCP Client] -->|MCP| SERVER[mcp-server.ts]
 
     subgraph Core["Core Modules"]
-        SERVER --> RET[retrieve.ts<br/>8-signal hybrid scoring]
+        SERVER --> RET[retrieve.ts<br/>9-signal hybrid scoring]
         SERVER --> GRP[graph.ts<br/>BFS traverse, community]
         SERVER --> INT[intelligence.ts<br/>Dedup, merge, versioning]
         SERVER --> OBS[observability.ts<br/>Analytics, health, dedup pairs]
+        EMB[embed.ts<br/>local ONNX embeddings] --> RET
+        EMB --> OBS
     end
 
-    subgraph DB["PostgreSQL 17 + pg_trgm + pg_cron"]
-        PG[(Entities + Relations<br/>+ Versions + Events)]
+    subgraph DB["PostgreSQL 17 + pg_trgm + pgvector + pg_cron"]
+        PG[(Entities + embedding<br/>+ Relations + Versions + Events)]
         CRON[pg_cron<br/>Nightly decay]
     end
 
@@ -93,12 +96,13 @@ graph TD
     style Sync fill:#1e293b,stroke:#a78bfa,color:#fff
 ```
 
-### Retrieval Scoring (8 signals)
+### Retrieval Scoring (9 signals)
 
 | Signal | Weight | Source |
 |--------|--------|--------|
-| Full-text rank | 0.20 | `ts_rank` on `tsvector` |
-| Trigram similarity | 0.15 | `pg_trgm` |
+| Full-text rank | 0.13 | `ts_rank` on `tsvector` |
+| Trigram similarity | 0.10 | `pg_trgm` |
+| Semantic similarity | 0.12 | `pgvector` cosine over bge-small-384 embeddings |
 | Tag match | 0.10 | Array overlap |
 | Temperature | 0.15 | Thermal model |
 | Importance | 0.10 | Auto-drifting (0.1–0.9) |
@@ -107,6 +111,30 @@ graph TD
 | Access frequency | 0.05 | Cumulative access count |
 
 Weights are configurable in `src/config.ts`.
+
+### Semantic Embeddings
+
+`recall` and the `health` dedup detector run over **local semantic embeddings** —
+no text ever leaves the machine:
+
+- **Model** — [`bge-small-en-v1.5`](https://huggingface.co/Xenova/bge-small-en-v1.5)
+  (384-d) via [`@huggingface/transformers`](https://github.com/huggingface/transformers.js),
+  ONNX, in-process, offline. First call loads the model (~1–2 s, warmed at boot);
+  subsequent embeds are ~10–30 ms.
+- **Storage** — an additive nullable `entities.embedding vector(384)` column
+  ([`pgvector`](https://github.com/pgvector/pgvector)). No ANN index at small
+  corpus sizes — exact brute-force cosine (`<=>`) is sub-millisecond.
+- **Semantic recall** — a paraphrase with zero shared keywords can still surface,
+  not just re-rank among lexical matches (the cosine arm widens the `WHERE`).
+- **Cosine dedup** — `health` surfaces near-duplicate pairs above a cosine
+  threshold for human-approved `merge` (never auto-merged).
+- **Pinned** — model + quantization (`fp32`) are fixed; changing either
+  invalidates every stored vector and requires a re-embed. A one-time
+  `scripts/backfill-embeddings.ts` embeds any rows written before embeddings
+  were enabled.
+- **`MEMORY_EMBED_ENABLED`** — machines with the flag set embed on write; others
+  store `NULL` (always safe) and let a primary backfill. Query-time embedding is
+  always available so semantic recall works everywhere.
 
 ### Thermal Model
 
@@ -138,6 +166,7 @@ make test              # unit tests (Vitest + pytest for scripts)
 make test-integration  # integration tests against real Postgres
 make status            # local DB + pg_cron status
 make decay             # run thermal decay (local)
+make backfill-embeddings  # embed any rows with a NULL embedding (ARGS=--dry-run to count)
 make canary            # events-pipeline freshness check (local)
 make cron-status       # pg_cron schedule and recent runs
 make graph             # Mermaid graph of memory network
@@ -153,21 +182,23 @@ Each command has a `-remote` variant (`dev-remote`, `status-remote`, `decay-remo
 ```
 src/
   mcp-server.ts       # MCP tool definitions and handlers
-  retrieve.ts         # 8-signal hybrid retrieval scoring
+  retrieve.ts         # 9-signal hybrid retrieval scoring
+  embed.ts            # Local bge-small ONNX embeddings (in-process, offline)
   thermal.ts          # Cascade bumps, pattern-aware decay, importance drift
   graph.ts            # BFS traversal, community detection, auto-relate
   intelligence.ts     # Dedup detection, confidence scoring, merge, versioning
-  observability.ts    # Analytics, health metrics, dedup candidate pairs
+  observability.ts    # Analytics, health metrics, cosine dedup pairs
   events.ts           # Fire-and-forget event logging
   file-sync.ts        # Optional dual-write to markdown files
   schema.ts           # Drizzle ORM schema (entities, relations, versions, events)
-  config.ts           # Scoring weights, decay rates, tier boundaries
+  config.ts           # Scoring weights, decay rates, tier boundaries, embed pins
   db.ts               # Database connection (auto-SSL for remote)
   import.ts           # Seed script for existing markdown memories
 scripts/
-  memory-decay.py     # Python decay runner (Docker exec fallback)
-  events_canary.py    # Event-freshness check (exits 1 if pipeline silent)
-  backfill-edges.ts   # One-time auto-relate backfill
+  memory-decay.py            # Python decay runner (Docker exec fallback)
+  events_canary.py           # Event-freshness check (exits 1 if pipeline silent)
+  backfill-edges.ts          # One-time auto-relate backfill
+  backfill-embeddings.ts     # One-time embedding backfill for NULL rows
 tests/
   *.test.ts           # Unit tests (Vitest)
   *.py                # Python tests (pytest)
@@ -218,7 +249,8 @@ files and documentation placeholders).
 
 - **Runtime**: Node.js 24+ (ESM) · **Language**: TypeScript 5.9 (strict)
 - **ORM**: Drizzle ORM · **MCP SDK**: `@modelcontextprotocol/sdk` · **Validation**: Zod
-- **Database**: PostgreSQL 17/16 + `pg_trgm` + `pg_cron`
+- **Database**: PostgreSQL 17/16 + `pg_trgm` + `pgvector` + `pg_cron`
+- **Embeddings**: `@huggingface/transformers` (bge-small-en-v1.5, 384-d, ONNX, in-process)
 - **Testing**: Vitest (TS) + pytest (Python) · **Container**: Docker Compose
 
 ## License

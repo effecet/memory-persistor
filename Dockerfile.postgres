@@ -1,5 +1,7 @@
 FROM postgres:16
 
+# pg_cron (nightly thermal decay) + pgvector (semantic embeddings, entities.embedding
+# vector(384)). Both come from the PGDG apt repo already present in the official image.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends postgresql-16-cron \
+    && apt-get install -y --no-install-recommends postgresql-16-cron postgresql-16-pgvector \
     && rm -rf /var/lib/apt/lists/*

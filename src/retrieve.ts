@@ -1,13 +1,17 @@
 /**
- * Search and retrieval logic (v2: 8-signal hybrid scoring).
+ * Search and retrieval logic (v3: 9-signal hybrid scoring).
  *
  * Scoring formula:
- *   score = textRank + trigramSimilarity + tagMatch + temperature
- *         + importance + graphCentrality + recencyBoost + accessFrequency
+ *   score = textRank + trigramSimilarity + semanticSimilarity + tagMatch
+ *         + temperature + importance + graphCentrality + recencyBoost
+ *         + accessFrequency
  *
  * Uses PostgreSQL full-text search (to_tsvector/to_tsquery) combined with
- * pg_trgm trigram similarity for fuzzy matching. Hybrid WHERE clause:
- * FTS match OR trigram similarity > threshold.
+ * pg_trgm trigram similarity for fuzzy matching, plus pgvector cosine
+ * similarity against a query embedding for semantic matching. Hybrid WHERE
+ * clause: FTS match OR trigram similarity > threshold OR cosine similarity
+ * > SEMANTIC_WHERE_THRESHOLD (so a paraphrase with zero shared tokens can
+ * still surface, not just re-rank among already-matched rows).
  *
  * All user input is parameterized.
  *
@@ -18,9 +22,10 @@
  */
 import { db } from './db.js';
 import { sql, type SQL } from 'drizzle-orm';
-import { SCORING_WEIGHTS, DEFAULT_RECALL_LIMIT, TRIGRAM_THRESHOLD, RESPONSE_CAP_BYTES } from './config.js';
+import { SCORING_WEIGHTS, DEFAULT_RECALL_LIMIT, TRIGRAM_THRESHOLD, SEMANTIC_WHERE_THRESHOLD, RESPONSE_CAP_BYTES } from './config.js';
 import { bump } from './thermal.js';
 import { truncateDescription } from './file-sync.js';
+import { embedForQuery, toPgVector } from './embed.js';
 
 export interface RecallOptions {
   query: string;
@@ -29,6 +34,18 @@ export interface RecallOptions {
   tier?: string;
   limit?: number;
   output_mode?: 'full' | 'summary';
+  /**
+   * Internal only — not exposed via the public `recall` MCP tool schema. Skips
+   * embedForQuery() entirely (semantic term is always 0, no WHERE widening).
+   * Used by remember's auto-relate call: it already computed a write-path
+   * vector for the SAME text via embedForWrite — a second embedForQuery call
+   * here would be pure redundant inference. It would also defeat the whole
+   * point of `EMBED_ON_WRITE_ENABLED` dev-only-embed: a write-disabled machine
+   * would otherwise still load the ONNX runtime on every `remember`, not just
+   * on an explicit `recall` — the one call site query-time embedding was
+   * ungated for.
+   */
+  skipSemantic?: boolean;
 }
 
 export interface RecallResponse {
@@ -174,8 +191,8 @@ async function attachRelated(rows: RecallResult[]): Promise<void> {
 }
 
 /**
- * Search memories using 8-signal hybrid scoring.
- * Matches via FTS OR trigram similarity (fuzzy).
+ * Search memories using 9-signal hybrid scoring.
+ * Matches via FTS OR trigram similarity (fuzzy) OR cosine similarity (semantic).
  * Bumps temperature on all returned results.
  */
 export async function recall(options: RecallOptions): Promise<RecallResponse> {
@@ -186,11 +203,13 @@ export async function recall(options: RecallOptions): Promise<RecallResponse> {
     tier,
     limit = DEFAULT_RECALL_LIMIT,
     output_mode = 'full',
+    skipSemantic = false,
   } = options;
 
   const {
     textRank: W1,
     trigramSimilarity: W2,
+    semanticSimilarity: W9,
     tagMatch: W3,
     temperature: W4,
     importance: W5,
@@ -208,14 +227,29 @@ export async function recall(options: RecallOptions): Promise<RecallResponse> {
   // The raw text used for trigram similarity comparison
   const rawQueryText = sanitizedQuery;
 
+  // Query embedding for the semantic signal. skipSemantic bypasses the
+  // embedForQuery() call entirely (see RecallOptions doc). Otherwise: a null
+  // vector (embed failure) and a null e.embedding (unembedded row) both funnel
+  // through the same COALESCE, so this recall's semantic term contributes 0
+  // and the WHERE clause doesn't widen — degrades to lexical-only behavior.
+  const queryVector = skipSemantic ? null : await embedForQuery(query);
+  const vectorParam = queryVector ? toPgVector(queryVector) : null;
+  const semanticExpr = sql`COALESCE(1 - (e.embedding <=> ${vectorParam}::vector), 0)`;
+
   // Text search building blocks
   const textCol = sql`(COALESCE(e.name, '') || ' ' || COALESCE(e.observations::text, ''))`;
   const tsvec = sql`to_tsvector('english', ${textCol})`;
   const tsq = sql`to_tsquery('english', ${tsqueryTerms})`;
 
-  // ── Hybrid WHERE: FTS match OR trigram similarity above threshold ──────
+  // ── Hybrid WHERE: FTS match OR trigram similarity OR high cosine similarity ──
+  // The semantic OR-arm is what lets a paraphrase with zero shared tokens
+  // surface at all (not just re-rank among rows already matched lexically).
   const matchConditions: SQL[] = [
-    sql`(${tsvec} @@ ${tsq} OR word_similarity(${rawQueryText}, ${textCol}) > ${TRIGRAM_THRESHOLD})`,
+    sql`(
+      ${tsvec} @@ ${tsq}
+      OR word_similarity(${rawQueryText}, ${textCol}) > ${TRIGRAM_THRESHOLD}
+      OR (${semanticExpr}) > ${SEMANTIC_WHERE_THRESHOLD}
+    )`,
   ];
 
   if (type) matchConditions.push(sql`e.type = ${type}`);
@@ -267,6 +301,7 @@ export async function recall(options: RecallOptions): Promise<RecallResponse> {
       (
         COALESCE(ts_rank(${tsvec}, ${tsq}), 0) * ${W1}::real
         + word_similarity(${rawQueryText}, ${textCol}) * ${W2}::real
+        + (${semanticExpr}) * ${W9}::real
         + (${tagMatchExpr}) * ${W3}::real
         + COALESCE(e.temperature, 0) * ${W4}::real
         + COALESCE(e.importance, 0.5) * ${W5}::real

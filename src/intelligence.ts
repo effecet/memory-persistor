@@ -8,6 +8,7 @@
 import { db } from './db.js';
 import { entities, memoryRelations, memoryVersions } from './schema.js';
 import { eq, sql, desc } from 'drizzle-orm';
+import { resolveEmbeddingForTextChange } from './embed.js';
 
 // ── Confidence scoring (pure function) ──────────────────────────────────────
 
@@ -171,9 +172,15 @@ export async function mergeMemories(
   await snapshotVersion(sourceId);
   await snapshotVersion(targetId);
 
-  // Fetch both memories
-  const [source] = await db.select().from(entities).where(eq(entities.id, sourceId)).limit(1);
-  const [target] = await db.select().from(entities).where(eq(entities.id, targetId)).limit(1);
+  // Fetch both memories (explicit columns — excludes embedding, unused here)
+  const mergeCols = {
+    name: entities.name,
+    observations: entities.observations,
+    tags: entities.tags,
+    importance: entities.importance,
+  };
+  const [source] = await db.select(mergeCols).from(entities).where(eq(entities.id, sourceId)).limit(1);
+  const [target] = await db.select(mergeCols).from(entities).where(eq(entities.id, targetId)).limit(1);
 
   if (!source || !target) {
     throw new Error(`Memory not found: ${!source ? sourceId : targetId}`);
@@ -196,14 +203,24 @@ export async function mergeMemories(
   if (source.tags && source.tags.length > 0) mergedFields.push('tags');
   if ((source.importance ?? 0.5) > (target.importance ?? 0.5)) mergedFields.push('importance');
 
+  // The merge always appends source text onto target's observations, so the
+  // target's embedding is now stale — same invalidate/recompute/preserve
+  // policy as mcp-server.ts's `update` handler.
+  const updateSet: Record<string, unknown> = {
+    observations: mergedObservations,
+    tags: mergedTags,
+    importance: mergedImportance,
+  };
+  const mergedEmbedding = await resolveEmbeddingForTextChange(target.name, mergedObservations);
+  if (mergedEmbedding !== undefined) {
+    updateSet.embedding = mergedEmbedding;
+    mergedFields.push('embedding');
+  }
+
   // Update target
   await db
     .update(entities)
-    .set({
-      observations: mergedObservations,
-      tags: mergedTags,
-      importance: mergedImportance,
-    })
+    .set(updateSet)
     .where(eq(entities.id, targetId));
 
   // Transfer edges from source to target (avoiding self-loops and duplicates)

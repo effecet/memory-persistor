@@ -4,6 +4,7 @@
  */
 import { db } from './db.js';
 import { sql } from 'drizzle-orm';
+import { DEDUP_COSINE_THRESHOLD } from './config.js';
 
 // ── Analytics ───────────────────────────────────────────────────────────────
 
@@ -106,6 +107,7 @@ export interface DedupCandidatePair {
   bName: string;
   bObservationsLength: number;
   bCreatedAt: string;
+  /** Cosine similarity (0–1) over bge-small embeddings; gated by DEDUP_COSINE_THRESHOLD. */
   similarity: number;
   proposedCanonicalId: string;
 }
@@ -142,10 +144,20 @@ export async function getHealth(): Promise<HealthResult> {
       db.execute(sql`
         SELECT COUNT(*)::int AS count FROM public.entities WHERE stale = true
       `),
-      // Dedup candidate pairs (with proposedCanonicalId) — capped at 100.
-      // COUNT(*) OVER() provides the total count before LIMIT, eliminating
-      // a separate count query (one less full self-join scan).
-      // Uses bidirectional word_similarity via GREATEST(forward, reverse).
+      // Dedup candidate pairs (cosine near-dupes) — capped at 100.
+      // Cosine over the bge-small embeddings: catches semantic/paraphrase dupes
+      // a name-only discriminator misses, and post-backfill has a real vector on
+      // every primary-origin row. Exclusions:
+      //   - NULL-embedding rows (write-disabled machines, pre-backfill) can't be
+      //     scored → excluded; an optional coverage monitor catches persistent
+      //     primary NULLs.
+      //   - pairs that already share an edge are already reconciled (merged
+      //     sources are deleted; related/superseded pairs aren't open dupes).
+      // Surfacing only — no merge, no delete (never auto-merge).
+      // observations char_length is still the canonical-pick tie-break.
+      // COUNT(*) OVER() gives the pre-LIMIT total in one pass.
+      // Still O(n²) on the self-join; at n≳2000 add an HNSW index + a per-row
+      // `embedding <=> embedding` lateral top-k instead of the full scan.
       db.execute(sql`
         WITH pair_scores AS (
           SELECT
@@ -157,21 +169,8 @@ export async function getHealth(): Promise<HealthResult> {
             b.name       AS "bName",
             char_length(COALESCE(b.observations, '')) AS "bObservationsLength",
             b.created_at AS "bCreatedAt",
-            -- Similarity is name-only. Concatenating multi-KB observations
-            -- made this O(n²) word_similarity infeasible — verified >2min
-            -- timeout at n=334 (name-only: ~400ms). This is a deliberate
-            -- narrowing: the name is the dedup discriminator; bodies added
-            -- quadratic trigram cost for marginal recall. observations are
-            -- still used below (char_length) for the canonical-pick
-            -- tie-break — that signal is unchanged. The 0.85 threshold is
-            -- now calibrated against name-only scores.
-            -- Future: the self-join is still O(n²) on pair count — at n≳2000
-            -- add a gin_trgm_ops index on name + a 'name %> name' join so the
-            -- planner does an index-backed similarity join instead of a scan.
-            GREATEST(
-              word_similarity(COALESCE(a.name, ''), COALESCE(b.name, '')),
-              word_similarity(COALESCE(b.name, ''), COALESCE(a.name, ''))
-            ) AS "similarity",
+            -- L2-normalized vectors → cosine similarity = 1 - cosine distance.
+            (1 - (a.embedding <=> b.embedding)) AS "similarity",
             CASE
               WHEN char_length(COALESCE(a.observations, ''))
                  > char_length(COALESCE(b.observations, '')) THEN a.id
@@ -184,10 +183,17 @@ export async function getHealth(): Promise<HealthResult> {
           JOIN public.entities b
             ON a.type = b.type
            AND a.id < b.id
+          WHERE a.embedding IS NOT NULL
+            AND b.embedding IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM public.memory_relations r
+              WHERE (r.from_id = a.id AND r.to_id = b.id)
+                 OR (r.from_id = b.id AND r.to_id = a.id)
+            )
         )
         SELECT *, (COUNT(*) OVER())::int AS "totalCount"
         FROM pair_scores
-        WHERE "similarity" > 0.85
+        WHERE "similarity" > ${DEDUP_COSINE_THRESHOLD}
         ORDER BY "similarity" DESC
         LIMIT 100
       `),
