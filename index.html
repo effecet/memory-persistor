@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="memory-persistor — a PostgreSQL-backed MCP memory server with thermal decay, a knowledge graph, and 9-signal hybrid retrieval including local semantic embeddings. Interactive 3D knowledge-graph showcase (sample data).">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧠</text></svg>">
+<title>memory-persistor &middot; a brain that runs warm</title>
+<style>
+  :root {
+    /* chrome tokens — dark is the primary vector-space aesthetic */
+    --bg: #0a0d14;
+    --bg-2: #10151f;
+    --ink: #e6ebf4;
+    --muted: #93a1b5;
+    --line: rgba(148,163,184,.16);
+    --card: rgba(15,20,30,.66);
+    --card-brd: rgba(148,163,184,.18);
+    --hot: #ff6a3d;
+    --warm: #f5b544;
+    --cold: #45c8f0;
+    --rel-related: #7c8aa0;
+    --rel-elaborates: #38bdf8;
+    --rel-supersedes: #34d399;
+    --rel-depends: #a78bfa;
+    --rel-contradicts: #fb7185;
+    --accent: #ff6a3d;
+    --focus: #ffb59c;
+    --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+    --grotesque: "SF Pro Display", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #eef2f9;
+      --bg-2: #e4eaf4;
+      --ink: #16202e;
+      --muted: #566274;
+      --line: rgba(30,41,59,.12);
+      --card: rgba(255,255,255,.72);
+      --card-brd: rgba(30,41,59,.14);
+      --hot: #e2482a;
+      --warm: #b9820f;
+      --cold: #0e8fc4;
+      --rel-related: #64748b;
+      --rel-elaborates: #0284c7;
+      --rel-supersedes: #059669;
+      --rel-depends: #7c3aed;
+      --rel-contradicts: #e11d48;
+      --accent: #e2482a;
+      --focus: #b3341a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0d14; --bg-2: #10151f; --ink: #e6ebf4; --muted: #93a1b5;
+    --line: rgba(148,163,184,.16); --card: rgba(15,20,30,.66); --card-brd: rgba(148,163,184,.18);
+    --hot: #ff6a3d; --warm: #f5b544; --cold: #45c8f0;
+    --rel-related: #7c8aa0; --rel-elaborates: #38bdf8; --rel-supersedes: #34d399;
+    --rel-depends: #a78bfa; --rel-contradicts: #fb7185; --accent: #ff6a3d; --focus: #ffb59c;
+  }
+  :root[data-theme="light"] {
+    --bg: #eef2f9; --bg-2: #e4eaf4; --ink: #16202e; --muted: #566274;
+    --line: rgba(30,41,59,.12); --card: rgba(255,255,255,.72); --card-brd: rgba(30,41,59,.14);
+    --hot: #e2482a; --warm: #b9820f; --cold: #0e8fc4;
+    --rel-related: #64748b; --rel-elaborates: #0284c7; --rel-supersedes: #059669;
+    --rel-depends: #7c3aed; --rel-contradicts: #e11d48; --accent: #e2482a; --focus: #b3341a;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  #stage {
+    position: fixed; inset: 0; overflow: hidden;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--mono);
+    -webkit-font-smoothing: antialiased;
+  }
+  #graph { position: absolute; inset: 0; display: block; touch-action: none; cursor: grab; }
+  #graph:active { cursor: grabbing; }
+  #graph:focus-visible { outline: 2px solid var(--focus); outline-offset: -4px; }
+
+  .overlay { position: absolute; z-index: 3; pointer-events: none; }
+
+  /* ── top-left: eyebrow + thesis ── */
+  #masthead { top: clamp(18px, 4vw, 40px); left: clamp(18px, 4vw, 44px); max-width: min(560px, 82vw); }
+  .eyebrow {
+    font-size: 12px; letter-spacing: .26em; text-transform: uppercase;
+    color: var(--muted); display: flex; align-items: center; gap: 10px; margin: 0 0 14px;
+  }
+  .eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 12px var(--accent); }
+  .eyebrow, h1, #masthead p { text-shadow: 0 1px 16px var(--bg), 0 0 6px var(--bg); }
+  h1 {
+    font-family: var(--grotesque);
+    font-weight: 800; letter-spacing: -0.02em; line-height: 0.98;
+    font-size: clamp(30px, 6.2vw, 62px); margin: 0; text-wrap: balance;
+  }
+  h1 .warm { color: var(--hot); }
+  #masthead p {
+    margin: 16px 0 0; max-width: 46ch; color: var(--muted);
+    font-size: clamp(12.5px, 1.5vw, 14px); line-height: 1.55; letter-spacing: .01em;
+  }
+  #gh-cta {
+    display: inline-flex; align-items: center; gap: 7px; margin-top: 20px;
+    pointer-events: auto; text-decoration: none;
+    font-family: var(--mono); font-size: 12.5px; letter-spacing: .04em;
+    color: var(--ink); border: 1px solid var(--card-brd); border-radius: 9px;
+    padding: 8px 14px; background: var(--card);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    transition: border-color .15s ease, color .15s ease;
+  }
+  #gh-cta:hover { border-color: var(--accent); color: var(--accent); }
+  #gh-cta:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  #masthead code { color: var(--ink); background: color-mix(in srgb, var(--ink) 9%, transparent);
+    padding: 1px 5px; border-radius: 4px; font-size: .92em; }
+
+  /* ── legend card ── */
+  #legend {
+    bottom: clamp(16px, 4vw, 34px); left: clamp(18px, 4vw, 44px);
+    background: var(--card); border: 1px solid var(--card-brd); border-radius: 14px;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    padding: 15px 17px; display: grid; gap: 14px;
+  }
+  .leg-group { display: grid; gap: 8px; }
+  .leg-title { font-size: 10px; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); }
+  .leg-row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .leg-item { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink); }
+  .swatch { width: 11px; height: 11px; border-radius: 50%; flex: none; }
+  .swatch.hot { background: var(--hot); box-shadow: 0 0 9px var(--hot); }
+  .swatch.warm { background: var(--warm); }
+  .swatch.cold { background: var(--cold); }
+  .edge-key { width: 22px; height: 0; border-top-width: 2px; border-top-style: solid; flex: none; }
+  .edge-key.dashed { border-top-style: dashed; }
+
+  /* ── bottom-right: counts + hint ── */
+  #meta {
+    bottom: clamp(16px, 4vw, 34px); right: clamp(18px, 4vw, 44px);
+    text-align: right; display: grid; gap: 9px; justify-items: end;
+  }
+  .stat-row { display: flex; gap: 18px; }
+  .stat { display: grid; gap: 2px; justify-items: end; }
+  .stat b { font-family: var(--grotesque); font-weight: 800; font-size: 22px; letter-spacing: -0.01em;
+    color: var(--ink); font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
+  .hint { font-size: 11px; color: var(--muted); letter-spacing: .04em; }
+  .hint kbd {
+    font-family: var(--mono); font-size: 10.5px; color: var(--ink);
+    border: 1px solid var(--card-brd); border-bottom-width: 2px; border-radius: 5px;
+    padding: 1px 5px; background: var(--card);
+  }
+
+  /* ── theme toggle ── */
+  #toggle {
+    position: absolute; top: clamp(18px, 4vw, 40px); right: clamp(18px, 4vw, 44px); z-index: 4;
+    pointer-events: auto; cursor: pointer;
+    background: var(--card); border: 1px solid var(--card-brd); border-radius: 10px;
+    color: var(--ink); font-family: var(--mono); font-size: 12px; letter-spacing: .05em;
+    padding: 8px 13px; display: flex; align-items: center; gap: 8px;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  }
+  #toggle:hover { border-color: var(--accent); }
+  #toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  /* ── node tooltip ── */
+  #tip {
+    position: absolute; z-index: 5; pointer-events: none; opacity: 0;
+    transform: translate(-50%, calc(-100% - 14px));
+    background: var(--bg-2); border: 1px solid var(--card-brd); border-radius: 10px;
+    padding: 9px 12px; min-width: 150px; max-width: 240px;
+    box-shadow: 0 12px 34px rgba(0,0,0,.42);
+    transition: opacity .12s ease;
+  }
+  #tip .t-label { font-family: var(--grotesque); font-weight: 700; font-size: 13.5px; color: var(--ink);
+    line-height: 1.25; margin-bottom: 7px; }
+  #tip .t-meta { display: flex; gap: 8px; align-items: center; font-size: 10.5px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--muted); }
+  #tip .t-tier { display: inline-flex; align-items: center; gap: 5px; }
+  #tip .t-tier .swatch { width: 9px; height: 9px; }
+  #tip .t-type { border-left: 1px solid var(--card-brd); padding-left: 8px; }
+
+  @media (max-width: 640px) {
+    #meta .stat-row { gap: 14px; }
+    #masthead p { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #tip { transition: none; }
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="graph" tabindex="0" aria-label="Interactive 3D knowledge graph of memory nodes connected by typed relations. Drag to orbit, hover a node for details."></canvas>
+
+  <button id="toggle" type="button" aria-label="Toggle light and dark theme">
+    <span id="toggle-icon" aria-hidden="true">&#9680;</span><span id="toggle-text">theme</span>
+  </button>
+
+  <header id="masthead" class="overlay">
+    <p class="eyebrow"><span class="dot"></span>memory-persistor &middot; the brain</p>
+    <h1>A memory that runs <span class="warm">warm</span>.</h1>
+    <p>A PostgreSQL knowledge graph for AI agents &mdash; memories carry a temperature that
+      decays over time, link through five typed relations, and surface via
+      <code>9-signal</code> hybrid recall with local <code>pgvector</code> embeddings.</p>
+    <a id="gh-cta" href="https://github.com/effecet/memory-persistor" target="_blank" rel="noopener">View source on GitHub<span aria-hidden="true">&#8599;</span></a>
+  </header>
+
+  <aside id="legend" class="overlay" aria-hidden="true">
+    <div class="leg-group">
+      <div class="leg-title">tier &middot; temperature</div>
+      <div class="leg-row">
+        <span class="leg-item"><span class="swatch hot"></span>hot</span>
+        <span class="leg-item"><span class="swatch warm"></span>warm</span>
+        <span class="leg-item"><span class="swatch cold"></span>cold</span>
+      </div>
+    </div>
+    <div class="leg-group">
+      <div class="leg-title">typed relations</div>
+      <div class="leg-row" id="rel-legend"></div>
+    </div>
+  </aside>
+
+  <div id="meta" class="overlay">
+    <div class="stat-row">
+      <div class="stat"><b id="n-nodes">0</b><span>memories</span></div>
+      <div class="stat"><b id="n-edges">0</b><span>relations</span></div>
+      <div class="stat"><b>7</b><span>types</span></div>
+    </div>
+    <div class="hint"><kbd>drag</kbd> orbit &middot; <kbd>scroll</kbd> zoom &middot; <kbd>hover</kbd> inspect</div>
+  </div>
+
+  <div id="tip" role="status" aria-live="polite">
+    <div class="t-label"></div>
+    <div class="t-meta">
+      <span class="t-tier"><span class="swatch"></span><span class="t-tier-name"></span></span>
+      <span class="t-type"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ── Anonymized / generic sample graph (NOT real memories) ──────────────
+  // Nodes span the 7 memory types, coloured by thermal tier. Edges use the
+  // five typed relations. Content is deliberately generic engineering lore.
+  const TIER = { HOT: "hot", WARM: "warm", COLD: "cold" };
+  const N = [
+    // decisions
+    { id: "d1", label: "Use pgvector for search", type: "decision", tier: TIER.HOT },
+    { id: "d2", label: "Postgres over a new store", type: "decision", tier: TIER.WARM },
+    { id: "d3", label: "Monorepo layout", type: "decision", tier: TIER.COLD },
+    { id: "d4", label: "In-process ONNX embeds", type: "decision", tier: TIER.HOT },
+    { id: "d5", label: "Dev-only embed-on-write", type: "decision", tier: TIER.WARM },
+    // projects
+    { id: "p1", label: "Search ranking v2", type: "project", tier: TIER.HOT },
+    { id: "p2", label: "Billing migration", type: "project", tier: TIER.COLD },
+    { id: "p3", label: "Auth service rewrite", type: "project", tier: TIER.WARM },
+    { id: "p4", label: "Nightly decay job", type: "project", tier: TIER.WARM },
+    // facts
+    { id: "f1", label: "bge-small is 384-d", type: "fact", tier: TIER.HOT },
+    { id: "f2", label: "Cosine is not Euclidean", type: "fact", tier: TIER.WARM },
+    { id: "f3", label: "pg_trgm needs a GIN index", type: "fact", tier: TIER.COLD },
+    { id: "f4", label: "fp32 is cross-OS stable", type: "fact", tier: TIER.HOT },
+    { id: "f5", label: "q8 diverges across builds", type: "fact", tier: TIER.WARM },
+    { id: "f6", label: "HNSW pays off past ~10k", type: "fact", tier: TIER.COLD },
+    // patterns
+    { id: "t1", label: "Retry with backoff", type: "pattern", tier: TIER.WARM },
+    { id: "t2", label: "Idempotent writes", type: "pattern", tier: TIER.WARM },
+    { id: "t3", label: "Cache-aside reads", type: "pattern", tier: TIER.COLD },
+    { id: "t4", label: "Non-fatal side effects", type: "pattern", tier: TIER.HOT },
+    // feedback
+    { id: "b1", label: "Prefer explicit types", type: "feedback", tier: TIER.WARM },
+    { id: "b2", label: "Small PRs merge faster", type: "feedback", tier: TIER.COLD },
+    { id: "b3", label: "Write the test first", type: "feedback", tier: TIER.HOT },
+    { id: "b4", label: "Never auto-merge dupes", type: "feedback", tier: TIER.WARM },
+    // references
+    { id: "r1", label: "pgvector docs", type: "reference", tier: TIER.COLD },
+    { id: "r2", label: "MCP specification", type: "reference", tier: TIER.WARM },
+    { id: "r3", label: "Drizzle ORM guide", type: "reference", tier: TIER.COLD },
+    { id: "r4", label: "Transformers.js README", type: "reference", tier: TIER.WARM },
+    // user
+    { id: "u1", label: "Prefers CLI tools", type: "user", tier: TIER.WARM },
+    { id: "u2", label: "Reviews own diffs", type: "user", tier: TIER.COLD },
+    { id: "u3", label: "Ships small, ships daily", type: "user", tier: TIER.HOT },
+    // superseded / contradicted anchors
+    { id: "x1", label: "Full-text search only", type: "decision", tier: TIER.COLD },
+    { id: "x2", label: "Store vectors elsewhere", type: "decision", tier: TIER.COLD },
+    { id: "x3", label: "Embed on every machine", type: "decision", tier: TIER.COLD },
+  ];
+
+  const REL = {
+    related_to:  { color: "--rel-related",     dashed: false, label: "related_to" },
+    elaborates:  { color: "--rel-elaborates",  dashed: false, label: "elaborates" },
+    supersedes:  { color: "--rel-supersedes",  dashed: false, label: "supersedes" },
+    depends_on:  { color: "--rel-depends",     dashed: false, label: "depends_on" },
+    contradicts: { color: "--rel-contradicts", dashed: true,  label: "contradicts" },
+  };
+
+  const E = [
+    ["d1", "x1", "supersedes"],
+    ["d1", "f1", "elaborates"],
+    ["f1", "f2", "related_to"],
+    ["f1", "f4", "related_to"],
+    ["d4", "f4", "elaborates"],
+    ["d4", "f5", "elaborates"],
+    ["f4", "f5", "contradicts"],
+    ["p1", "d1", "depends_on"],
+    ["p1", "f3", "depends_on"],
+    ["d1", "r1", "related_to"],
+    ["d4", "r4", "related_to"],
+    ["d2", "x2", "supersedes"],
+    ["d2", "d1", "related_to"],
+    ["d5", "x3", "supersedes"],
+    ["d5", "u3", "related_to"],
+    ["p4", "d5", "depends_on"],
+    ["f6", "d1", "elaborates"],
+    ["f6", "f3", "related_to"],
+    ["p3", "t1", "depends_on"],
+    ["p3", "t2", "depends_on"],
+    ["t2", "t4", "related_to"],
+    ["p4", "t4", "depends_on"],
+    ["t1", "t3", "related_to"],
+    ["b1", "u2", "related_to"],
+    ["b3", "u3", "related_to"],
+    ["b2", "u1", "related_to"],
+    ["b4", "d1", "related_to"],
+    ["p2", "d3", "depends_on"],
+    ["d3", "r3", "related_to"],
+    ["r2", "d4", "related_to"],
+    ["b3", "p1", "elaborates"],
+    ["t4", "d4", "related_to"],
+    ["u3", "b3", "related_to"],
+    ["f2", "r1", "related_to"],
+    ["p1", "r2", "depends_on"],
+    ["d5", "f5", "related_to"],
+  ];
+
+  // ── palette read from CSS custom properties (theme-reactive) ───────────
+  const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  let PAL = {};
+  function readPalette() {
+    PAL = {
+      bg: cssVar("--bg"),
+      hot: cssVar("--hot"), warm: cssVar("--warm"), cold: cssVar("--cold"),
+      ink: cssVar("--ink"), muted: cssVar("--muted"),
+      rel: {
+        related_to: cssVar("--rel-related"),
+        elaborates: cssVar("--rel-elaborates"),
+        supersedes: cssVar("--rel-supersedes"),
+        depends_on: cssVar("--rel-depends"),
+        contradicts: cssVar("--rel-contradicts"),
+      },
+      dark: isDark(),
+    };
+  }
+  const tierColor = (t) => t === TIER.HOT ? PAL.hot : t === TIER.WARM ? PAL.warm : PAL.cold;
+  function isDark() {
+    const set = document.documentElement.getAttribute("data-theme");
+    if (set) return set === "dark";
+    return matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+
+  // hex/rgb -> {r,g,b}
+  function toRGB(c) {
+    c = c.trim();
+    if (c[0] === "#") {
+      if (c.length === 4) c = "#" + c[1]+c[1]+c[2]+c[2]+c[3]+c[3];
+      return { r: parseInt(c.slice(1,3),16), g: parseInt(c.slice(3,5),16), b: parseInt(c.slice(5,7),16) };
+    }
+    const m = c.match(/[\d.]+/g) || [0,0,0];
+    return { r: +m[0], g: +m[1], b: +m[2] };
+  }
+  const rgba = (c, a) => { const { r, g, b } = toRGB(c); return `rgba(${r},${g},${b},${a})`; };
+
+  // ── graph model ────────────────────────────────────────────────────────
+  const idx = new Map(N.map((n, i) => [n.id, i]));
+  const nodes = N.map((n) => ({
+    ...n,
+    x: (Math.random() - 0.5) * 320, y: (Math.random() - 0.5) * 320, z: (Math.random() - 0.5) * 320,
+    vx: 0, vy: 0, vz: 0, deg: 0,
+    sx: 0, sy: 0, sz: 0, sr: 0, // projected
+  }));
+  const edges = E.map(([a, b, rel]) => {
+    const s = nodes[idx.get(a)], t = nodes[idx.get(b)];
+    s.deg++; t.deg++;
+    return { s, t, rel };
+  });
+
+  // ── 3D force-directed layout (settle synchronously, then orbit) ────────
+  function settle(iterations) {
+    const REP = 42000, SPRING = 0.012, REST = 74, CENTER = 0.0032, DAMP = 0.86;
+    for (let it = 0; it < iterations; it++) {
+      for (let i = 0; i < nodes.length; i++) {
+        const a = nodes[i];
+        for (let j = i + 1; j < nodes.length; j++) {
+          const b = nodes[j];
+          let dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+          let d2 = dx*dx + dy*dy + dz*dz + 0.01;
+          const f = REP / d2;
+          const d = Math.sqrt(d2);
+          const ux = dx/d, uy = dy/d, uz = dz/d;
+          a.vx += ux*f; a.vy += uy*f; a.vz += uz*f;
+          b.vx -= ux*f; b.vy -= uy*f; b.vz -= uz*f;
+        }
+      }
+      for (const e of edges) {
+        const { s, t } = e;
+        let dx = t.x - s.x, dy = t.y - s.y, dz = t.z - s.z;
+        const d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.01;
+        const f = (d - REST) * SPRING;
+        const ux = dx/d, uy = dy/d, uz = dz/d;
+        s.vx += ux*f; s.vy += uy*f; s.vz += uz*f;
+        t.vx -= ux*f; t.vy -= uy*f; t.vz -= uz*f;
+      }
+      for (const a of nodes) {
+        a.vx -= a.x*CENTER; a.vy -= a.y*CENTER; a.vz -= a.z*CENTER;
+        a.vx *= DAMP; a.vy *= DAMP; a.vz *= DAMP;
+        a.x += a.vx; a.y += a.vy; a.z += a.vz;
+      }
+    }
+  }
+  settle(520);
+
+  // ── canvas / render ────────────────────────────────────────────────────
+  const canvas = document.getElementById("graph");
+  const ctx = canvas.getContext("2d");
+  let W = 0, H = 0, DPR = 1, cx = 0, cy = 0;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    cx = W / 2; cy = H / 2;
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let rotY = 0.5, rotX = -0.32, autoSpin = reduce ? 0 : 0.0016;
+  let dragging = false, lastX = 0, lastY = 0, spinPaused = false;
+  let hoverNode = null;
+  let zoom = 1;
+  const setZoom = (z) => { zoom = Math.max(0.4, Math.min(4.2, z)); };
+
+  function project() {
+    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+    const focal = 640, s = (Math.min(W, H) / 900) * 1.5 * zoom;
+    for (const n of nodes) {
+      // rotate Y then X
+      let x = n.x * cosY - n.z * sinY;
+      let z = n.x * sinY + n.z * cosY;
+      let y = n.y * cosX - z * sinX;
+      z = n.y * sinX + z * cosX;
+      const persp = focal / (focal + z);
+      n.sx = cx + x * persp * s;
+      n.sy = cy + y * persp * s;
+      n.sz = z;
+      n.sr = Math.max(2.4, (5 + n.deg * 0.9) * persp * s);
+      n.persp = persp;
+    }
+  }
+
+  function depthAlpha(z) {
+    // z ranges roughly [-300, 300]; nearer (smaller z) = brighter
+    const a = 1 - (z + 300) / 900;
+    return Math.max(0.12, Math.min(1, a));
+  }
+
+  // keep always-on labels out of the overlaid chrome (masthead, legend, meta, toggle)
+  function inLabelSafeZone(x, y) {
+    if (x < 600 && y < 360) return false;      // masthead (top-left)
+    if (x < 380 && y > H - 230) return false;  // legend (bottom-left)
+    if (x > W - 330 && y > H - 150) return false; // meta (bottom-right)
+    if (x > W - 150 && y < 72) return false;   // theme toggle (top-right)
+    return true;
+  }
+
+  function draw() {
+    project();
+    ctx.clearRect(0, 0, W, H);
+
+    // ambient radial vignette
+    const vg = ctx.createRadialGradient(cx, cy * 0.92, 40, cx, cy, Math.max(W, H) * 0.72);
+    vg.addColorStop(0, rgba(PAL.dark ? "#1a2436" : "#ffffff", PAL.dark ? 0.55 : 0.3));
+    vg.addColorStop(1, rgba(PAL.bg, 0));
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+
+    const hoverSet = new Set();
+    if (hoverNode) {
+      hoverSet.add(hoverNode);
+      for (const e of edges) if (e.s === hoverNode || e.t === hoverNode) { hoverSet.add(e.s); hoverSet.add(e.t); }
+    }
+
+    // edges (painter's order by mean depth, far first)
+    const sortedEdges = edges.slice().sort((a, b) => (b.s.sz + b.t.sz) - (a.s.sz + a.t.sz));
+    for (const e of sortedEdges) {
+      const active = !hoverNode || (e.s === hoverNode || e.t === hoverNode);
+      const meanZ = (e.s.sz + e.t.sz) / 2;
+      let a = depthAlpha(meanZ) * (PAL.dark ? 0.5 : 0.62);
+      if (hoverNode) a = active ? Math.min(1, a + 0.4) : a * 0.14;
+      ctx.beginPath();
+      ctx.moveTo(e.s.sx, e.s.sy);
+      ctx.lineTo(e.t.sx, e.t.sy);
+      ctx.strokeStyle = rgba(PAL.rel[e.rel], a);
+      ctx.lineWidth = active && hoverNode ? 1.7 : 1;
+      if (REL[e.rel].dashed) ctx.setLineDash([4, 4]); else ctx.setLineDash([]);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // nodes (far first)
+    const sortedNodes = nodes.slice().sort((a, b) => b.sz - a.sz);
+    for (const n of sortedNodes) {
+      const dimmed = hoverNode && !hoverSet.has(n);
+      let a = depthAlpha(n.sz);
+      if (dimmed) a *= 0.16;
+      const col = tierColor(n.tier);
+
+      // hot glow
+      if (n.tier === TIER.HOT && !dimmed) {
+        const g = ctx.createRadialGradient(n.sx, n.sy, 0, n.sx, n.sy, n.sr * 5);
+        g.addColorStop(0, rgba(col, 0.5 * a));
+        g.addColorStop(1, rgba(col, 0));
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(n.sx, n.sy, n.sr * 5, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // core
+      ctx.beginPath();
+      ctx.arc(n.sx, n.sy, n.sr, 0, Math.PI * 2);
+      ctx.fillStyle = rgba(col, a);
+      ctx.fill();
+      // rim
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = rgba(PAL.dark ? "#0a0d14" : "#ffffff", Math.min(0.9, a));
+      ctx.stroke();
+
+      // labels: hovered neighbourhood always; otherwise hot & near, but only
+      // where they won't collide with the overlaid chrome.
+      const near = n.persp > 1.02;
+      const showLabel = (hoverNode && hoverSet.has(n)) ||
+        (!hoverNode && n.tier === TIER.HOT && near && inLabelSafeZone(n.sx, n.sy));
+      if (showLabel && !dimmed) {
+        ctx.font = "11px ui-monospace, 'JetBrains Mono', Menlo, monospace";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        const tx = n.sx + n.sr + 6, ty = n.sy;
+        const isHoverCore = n === hoverNode;
+        ctx.fillStyle = rgba(PAL.ink, isHoverCore ? 1 : Math.min(0.92, a + 0.3));
+        if (PAL.dark) {
+          ctx.shadowColor = "rgba(0,0,0,0.75)"; ctx.shadowBlur = 4;
+        }
+        ctx.fillText(n.label, tx, ty);
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    // update tooltip position (DOM)
+    if (hoverNode) positionTip(hoverNode);
+  }
+
+  // ── animation loop ──────────────────────────────────────────────────────
+  function frame() {
+    if (autoSpin && !dragging && !spinPaused) rotY += autoSpin;
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ── interaction: drag to orbit · scroll / pinch to zoom ──────────────────
+  const pointers = new Map();
+  let pinchDist = 0;
+  const twoPointerDist = () => {
+    const p = [...pointers.values()];
+    return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+  };
+
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 1) { dragging = true; lastX = e.clientX; lastY = e.clientY; }
+    else if (pointers.size === 2) { dragging = false; pinchDist = twoPointerDist(); }
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size >= 2) {
+      const d = twoPointerDist();
+      if (pinchDist > 0) setZoom(zoom * (d / pinchDist));
+      pinchDist = d;
+      return;
+    }
+    if (dragging) {
+      rotY += (e.clientX - lastX) * 0.006;
+      rotX += (e.clientY - lastY) * 0.006;
+      rotX = Math.max(-1.35, Math.min(1.35, rotX));
+      lastX = e.clientX; lastY = e.clientY;
+    } else {
+      pick(e.clientX, e.clientY);
+    }
+  });
+  function endPointer(e) {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinchDist = 0;
+    if (pointers.size === 0) { dragging = false; }
+    else { const p = [...pointers.values()][0]; dragging = true; lastX = p.x; lastY = p.y; }
+  }
+  canvas.addEventListener("pointerup", endPointer);
+  canvas.addEventListener("pointercancel", endPointer);
+  canvas.addEventListener("pointerleave", () => { if (pointers.size === 0) { hoverNode = null; hideTip(); } });
+
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    setZoom(zoom * (e.deltaY < 0 ? 1.12 : 0.89));
+  }, { passive: false });
+
+  canvas.addEventListener("keydown", (e) => {
+    const step = 0.12;
+    if (e.key === "ArrowLeft") { rotY -= step; e.preventDefault(); }
+    else if (e.key === "ArrowRight") { rotY += step; e.preventDefault(); }
+    else if (e.key === "ArrowUp") { rotX = Math.max(-1.35, rotX - step); e.preventDefault(); }
+    else if (e.key === "ArrowDown") { rotX = Math.min(1.35, rotX + step); e.preventDefault(); }
+    else if (e.key === "+" || e.key === "=") { setZoom(zoom * 1.12); e.preventDefault(); }
+    else if (e.key === "-" || e.key === "_") { setZoom(zoom * 0.89); e.preventDefault(); }
+    else if (e.key === " ") { spinPaused = !spinPaused; e.preventDefault(); }
+  });
+
+  // ── hit testing for hover ────────────────────────────────────────────────
+  function pick(px, py) {
+    let best = null, bestD = 22 * 22;
+    for (const n of nodes) {
+      const dx = px - n.sx, dy = py - n.sy;
+      const rr = Math.max(n.sr + 6, 12);
+      const d = dx*dx + dy*dy;
+      if (d < rr*rr && d < bestD) { bestD = d; best = n; }
+    }
+    if (best !== hoverNode) {
+      hoverNode = best;
+      if (best) showTip(best); else hideTip();
+    }
+  }
+
+  // ── tooltip DOM ───────────────────────────────────────────────────────────
+  const tip = document.getElementById("tip");
+  const tipLabel = tip.querySelector(".t-label");
+  const tipTierName = tip.querySelector(".t-tier-name");
+  const tipTierSw = tip.querySelector(".t-tier .swatch");
+  const tipType = tip.querySelector(".t-type");
+  function showTip(n) {
+    tipLabel.textContent = n.label;
+    tipTierName.textContent = n.tier;
+    tipTierSw.style.background = tierColor(n.tier);
+    tipTierSw.style.boxShadow = n.tier === TIER.HOT ? "0 0 8px " + tierColor(n.tier) : "none";
+    tipType.textContent = n.type;
+    tip.style.opacity = "1";
+  }
+  function hideTip() { tip.style.opacity = "0"; }
+  function positionTip(n) {
+    tip.style.left = n.sx + "px";
+    tip.style.top = n.sy - n.sr + "px";
+  }
+
+  // ── relation legend (built from REL) ───────────────────────────────────────
+  const relLegend = document.getElementById("rel-legend");
+  for (const key of Object.keys(REL)) {
+    const item = document.createElement("span");
+    item.className = "leg-item";
+    const line = document.createElement("span");
+    line.className = "edge-key" + (REL[key].dashed ? " dashed" : "");
+    line.style.borderTopColor = "var(" + REL[key].color + ")";
+    const txt = document.createElement("span");
+    txt.textContent = REL[key].label;
+    item.appendChild(line); item.appendChild(txt);
+    relLegend.appendChild(item);
+  }
+
+  // ── counts ─────────────────────────────────────────────────────────────────
+  document.getElementById("n-nodes").textContent = nodes.length;
+  document.getElementById("n-edges").textContent = edges.length;
+
+  // ── theme toggle ─────────────────────────────────────────────────────────
+  const toggle = document.getElementById("toggle");
+  const toggleText = document.getElementById("toggle-text");
+  function syncToggleLabel() {
+    toggleText.textContent = isDark() ? "light" : "dark";
+  }
+  toggle.addEventListener("click", () => {
+    const next = isDark() ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    readPalette(); syncToggleLabel();
+  });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readPalette(); syncToggleLabel(); });
+
+  readPalette();
+  syncToggleLabel();
+})();
+</script>
+</body>
+</html>
