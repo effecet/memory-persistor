@@ -179,8 +179,30 @@
   #tip .t-type { border-left: 1px solid var(--card-brd); padding-left: 8px; }
 
   @media (max-width: 640px) {
-    #meta .stat-row { gap: 14px; }
-    #masthead p { display: none; }
+    /* hide only the description paragraph — NOT the eyebrow (also a <p>) */
+    #masthead p:not(.eyebrow) { display: none; }
+    #masthead { max-width: calc(100vw - 36px); }
+
+    /* stack the bottom chrome: legend above, stats + hint centered below */
+    #legend {
+      left: 12px; right: 12px; bottom: 90px;
+      padding: 11px 13px; gap: 11px;
+    }
+    #legend .leg-row { gap: 8px 12px; }
+
+    #meta {
+      left: 12px; right: 12px; bottom: 14px;
+      justify-items: center; text-align: center;
+    }
+    #meta .stat-row { justify-content: center; gap: 20px; }
+    #meta .stat { justify-items: center; }
+    #meta .stat b { font-size: 18px; }
+    .hint { text-align: center; }
+  }
+  @media (max-width: 380px) {
+    /* very narrow: the stats become noise — drop them, keep the hint */
+    #meta .stat-row { display: none; }
+    #legend { bottom: 46px; }
   }
   @media (prefers-reduced-motion: reduce) {
     #tip { transition: none; }
@@ -226,7 +248,7 @@
       <div class="stat"><b id="n-edges">0</b><span>relations</span></div>
       <div class="stat"><b>7</b><span>types</span></div>
     </div>
-    <div class="hint"><kbd>drag</kbd> orbit &middot; <kbd>scroll</kbd> zoom &middot; <kbd>hover</kbd> inspect</div>
+    <div class="hint"><kbd>drag</kbd> orbit &middot; <kbd>scroll / pinch</kbd> zoom &middot; <kbd>hover</kbd> inspect</div>
   </div>
 
   <div id="tip" role="status" aria-live="polite">
