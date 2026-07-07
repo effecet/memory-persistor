@@ -7,12 +7,15 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![MCP](https://img.shields.io/badge/MCP-server-f97316)](https://modelcontextprotocol.io/)
 [![🧠 thermal memory](https://img.shields.io/badge/%F0%9F%A7%A0-thermal%20memory-7C3AED)](./src/thermal.ts)
+[![live demo](https://img.shields.io/badge/live%20demo-3D%20graph-f97316?logo=github&logoColor=white)](https://effecet.github.io/memory-persistor/)
 
 A PostgreSQL-backed **MCP memory server** with thermal decay, a knowledge graph,
 and 9-signal hybrid retrieval — including **local semantic embeddings** (bge-small
 via ONNX, in-process, offline) — a long-term memory for AI agents (e.g. Claude
 Code). Runs against any Postgres: a managed cloud instance (Supabase) or a local
 Docker container.
+
+> 🔮 **Live demo** — explore the memory graph in 3D → **[effecet.github.io/memory-persistor](https://effecet.github.io/memory-persistor/)**
 
 > A reusable scaffold. Point it at your own Postgres, run the migrations, and wire
 > it into your MCP client.
