@@ -198,6 +198,7 @@
     #meta .stat { justify-items: center; }
     #meta .stat b { font-size: 18px; }
     .hint { text-align: center; }
+    .hover-hint { display: none; }  /* no hover on touch */
   }
   @media (max-width: 380px) {
     /* very narrow: the stats become noise — drop them, keep the hint */
@@ -248,7 +249,7 @@
       <div class="stat"><b id="n-edges">0</b><span>relations</span></div>
       <div class="stat"><b>7</b><span>types</span></div>
     </div>
-    <div class="hint"><kbd>drag</kbd> orbit &middot; <kbd>scroll / pinch</kbd> zoom &middot; <kbd>hover</kbd> inspect</div>
+    <div class="hint"><kbd>drag</kbd> orbit &middot; <kbd>scroll / pinch</kbd> zoom<span class="hover-hint"> &middot; <kbd>hover</kbd> inspect</span></div>
   </div>
 
   <div id="tip" role="status" aria-live="polite">
@@ -275,11 +276,22 @@
     { id: "d3", label: "Monorepo layout", type: "decision", tier: TIER.COLD },
     { id: "d4", label: "In-process ONNX embeds", type: "decision", tier: TIER.HOT },
     { id: "d5", label: "Dev-only embed-on-write", type: "decision", tier: TIER.WARM },
+    { id: "d6", label: "Cosine over trigram dedup", type: "decision", tier: TIER.WARM },
+    { id: "d7", label: "Thermal decay for memory", type: "decision", tier: TIER.HOT },
+    { id: "d8", label: "Typed knowledge-graph edges", type: "decision", tier: TIER.WARM },
+    { id: "d9", label: "Real DB in integration tests", type: "decision", tier: TIER.WARM },
+    { id: "d10", label: "Feature-flag risky writes", type: "decision", tier: TIER.COLD },
+    { id: "d11", label: "Grace window before alerts", type: "decision", tier: TIER.COLD },
+    { id: "d12", label: "9-signal hybrid recall", type: "decision", tier: TIER.HOT },
     // projects
     { id: "p1", label: "Search ranking v2", type: "project", tier: TIER.HOT },
     { id: "p2", label: "Billing migration", type: "project", tier: TIER.COLD },
     { id: "p3", label: "Auth service rewrite", type: "project", tier: TIER.WARM },
     { id: "p4", label: "Nightly decay job", type: "project", tier: TIER.WARM },
+    { id: "p5", label: "Graph traversal API", type: "project", tier: TIER.HOT },
+    { id: "p6", label: "Embedding backfill", type: "project", tier: TIER.WARM },
+    { id: "p7", label: "Brain canary monitor", type: "project", tier: TIER.COLD },
+    { id: "p8", label: "Dedup review tool", type: "project", tier: TIER.COLD },
     // facts
     { id: "f1", label: "bge-small is 384-d", type: "fact", tier: TIER.HOT },
     { id: "f2", label: "Cosine is not Euclidean", type: "fact", tier: TIER.WARM },
@@ -287,29 +299,48 @@
     { id: "f4", label: "fp32 is cross-OS stable", type: "fact", tier: TIER.HOT },
     { id: "f5", label: "q8 diverges across builds", type: "fact", tier: TIER.WARM },
     { id: "f6", label: "HNSW pays off past ~10k", type: "fact", tier: TIER.COLD },
+    { id: "f7", label: "L2-normalized dot = cosine", type: "fact", tier: TIER.WARM },
+    { id: "f8", label: "tsvector ranks by frequency", type: "fact", tier: TIER.COLD },
+    { id: "f9", label: "ONNX needs no GPU", type: "fact", tier: TIER.WARM },
+    { id: "f10", label: "Warm the model at boot", type: "fact", tier: TIER.WARM },
+    { id: "f11", label: "NULLs are safe to backfill", type: "fact", tier: TIER.COLD },
     // patterns
     { id: "t1", label: "Retry with backoff", type: "pattern", tier: TIER.WARM },
     { id: "t2", label: "Idempotent writes", type: "pattern", tier: TIER.WARM },
     { id: "t3", label: "Cache-aside reads", type: "pattern", tier: TIER.COLD },
     { id: "t4", label: "Non-fatal side effects", type: "pattern", tier: TIER.HOT },
+    { id: "t5", label: "Fail open, log loud", type: "pattern", tier: TIER.WARM },
+    { id: "t6", label: "Debounce noisy alerts", type: "pattern", tier: TIER.COLD },
+    { id: "t7", label: "Snapshot before update", type: "pattern", tier: TIER.WARM },
+    { id: "t8", label: "Batch then flush", type: "pattern", tier: TIER.COLD },
     // feedback
     { id: "b1", label: "Prefer explicit types", type: "feedback", tier: TIER.WARM },
     { id: "b2", label: "Small PRs merge faster", type: "feedback", tier: TIER.COLD },
     { id: "b3", label: "Write the test first", type: "feedback", tier: TIER.HOT },
     { id: "b4", label: "Never auto-merge dupes", type: "feedback", tier: TIER.WARM },
+    { id: "b5", label: "Propose before acting", type: "feedback", tier: TIER.HOT },
+    { id: "b6", label: "Verify on main first", type: "feedback", tier: TIER.WARM },
+    { id: "b7", label: "Refresh docs before push", type: "feedback", tier: TIER.COLD },
     // references
     { id: "r1", label: "pgvector docs", type: "reference", tier: TIER.COLD },
     { id: "r2", label: "MCP specification", type: "reference", tier: TIER.WARM },
     { id: "r3", label: "Drizzle ORM guide", type: "reference", tier: TIER.COLD },
     { id: "r4", label: "Transformers.js README", type: "reference", tier: TIER.WARM },
+    { id: "r5", label: "Postgres FTS manual", type: "reference", tier: TIER.COLD },
+    { id: "r6", label: "ONNX Runtime docs", type: "reference", tier: TIER.COLD },
+    { id: "r7", label: "pg_cron scheduling", type: "reference", tier: TIER.COLD },
     // user
     { id: "u1", label: "Prefers CLI tools", type: "user", tier: TIER.WARM },
     { id: "u2", label: "Reviews own diffs", type: "user", tier: TIER.COLD },
     { id: "u3", label: "Ships small, ships daily", type: "user", tier: TIER.HOT },
+    { id: "u4", label: "Privacy-first by default", type: "user", tier: TIER.WARM },
+    { id: "u5", label: "Solo operator", type: "user", tier: TIER.COLD },
     // superseded / contradicted anchors
     { id: "x1", label: "Full-text search only", type: "decision", tier: TIER.COLD },
     { id: "x2", label: "Store vectors elsewhere", type: "decision", tier: TIER.COLD },
     { id: "x3", label: "Embed on every machine", type: "decision", tier: TIER.COLD },
+    { id: "x4", label: "Mock the DB in tests", type: "decision", tier: TIER.COLD },
+    { id: "x5", label: "One giant PR", type: "decision", tier: TIER.COLD },
   ];
 
   const REL = {
@@ -321,42 +352,108 @@
   };
 
   const E = [
+    // embeddings & vectors
     ["d1", "x1", "supersedes"],
     ["d1", "f1", "elaborates"],
+    ["d1", "r1", "related_to"],
+    ["d1", "d12", "elaborates"],
     ["f1", "f2", "related_to"],
     ["f1", "f4", "related_to"],
+    ["f1", "f7", "related_to"],
+    ["f7", "f2", "elaborates"],
     ["d4", "f4", "elaborates"],
     ["d4", "f5", "elaborates"],
     ["f4", "f5", "contradicts"],
-    ["p1", "d1", "depends_on"],
-    ["p1", "f3", "depends_on"],
-    ["d1", "r1", "related_to"],
+    ["d4", "f9", "related_to"],
     ["d4", "r4", "related_to"],
-    ["d2", "x2", "supersedes"],
-    ["d2", "d1", "related_to"],
-    ["d5", "x3", "supersedes"],
-    ["d5", "u3", "related_to"],
-    ["p4", "d5", "depends_on"],
+    ["d4", "r6", "related_to"],
+    ["f10", "d4", "elaborates"],
+    ["f9", "r6", "related_to"],
     ["f6", "d1", "elaborates"],
     ["f6", "f3", "related_to"],
+    ["f6", "r1", "related_to"],
+    // recall & search
+    ["d12", "f8", "elaborates"],
+    ["f8", "r5", "related_to"],
+    ["p1", "d1", "depends_on"],
+    ["p1", "d12", "depends_on"],
+    ["p1", "f3", "depends_on"],
+    ["p1", "r2", "depends_on"],
+    ["b3", "p1", "elaborates"],
+    ["p5", "d8", "depends_on"],
+    ["p5", "d1", "related_to"],
+    ["p5", "r2", "related_to"],
+    // dedup
+    ["d6", "x1", "supersedes"],
+    ["d6", "f7", "elaborates"],
+    ["d6", "b4", "related_to"],
+    ["p8", "d6", "depends_on"],
+    ["p8", "f2", "related_to"],
+    // dev-only embed & backfill
+    ["d5", "x3", "supersedes"],
+    ["d5", "u4", "related_to"],
+    ["d5", "f5", "related_to"],
+    ["d5", "f11", "elaborates"],
+    ["p6", "d5", "depends_on"],
+    ["p6", "f10", "related_to"],
+    ["p6", "f11", "depends_on"],
+    // database
+    ["d2", "x2", "supersedes"],
+    ["d2", "d1", "related_to"],
+    ["d2", "r5", "related_to"],
+    ["d3", "r3", "related_to"],
+    ["p2", "d3", "depends_on"],
+    // thermal & decay
+    ["d7", "p4", "related_to"],
+    ["p4", "d5", "depends_on"],
+    ["p4", "t7", "related_to"],
+    ["p4", "r7", "depends_on"],
+    ["r7", "d7", "related_to"],
+    ["d7", "t7", "related_to"],
+    // knowledge graph
+    ["d8", "p5", "related_to"],
+    ["d8", "t7", "related_to"],
+    ["d8", "r3", "related_to"],
+    // agent / MCP
+    ["r2", "d4", "related_to"],
+    ["r2", "d12", "related_to"],
+    // patterns
     ["p3", "t1", "depends_on"],
     ["p3", "t2", "depends_on"],
     ["t2", "t4", "related_to"],
+    ["t2", "t7", "elaborates"],
     ["p4", "t4", "depends_on"],
     ["t1", "t3", "related_to"],
-    ["b1", "u2", "related_to"],
-    ["b3", "u3", "related_to"],
-    ["b2", "u1", "related_to"],
-    ["b4", "d1", "related_to"],
-    ["p2", "d3", "depends_on"],
-    ["d3", "r3", "related_to"],
-    ["r2", "d4", "related_to"],
-    ["b3", "p1", "elaborates"],
+    ["t1", "t8", "related_to"],
+    ["t5", "t4", "related_to"],
     ["t4", "d4", "related_to"],
-    ["u3", "b3", "related_to"],
+    ["t3", "t8", "related_to"],
+    // canary
+    ["p7", "t6", "depends_on"],
+    ["p7", "d11", "related_to"],
+    ["p7", "t5", "related_to"],
+    ["p7", "f10", "related_to"],
+    ["d11", "t6", "elaborates"],
+    ["p7", "d7", "related_to"],
+    // testing
+    ["d9", "x4", "supersedes"],
+    ["d9", "b3", "related_to"],
+    ["b3", "b5", "elaborates"],
+    ["b3", "u3", "related_to"],
+    ["d10", "t4", "related_to"],
+    // feedback & user
+    ["b1", "u2", "related_to"],
+    ["b2", "u1", "related_to"],
+    ["b2", "x5", "contradicts"],
+    ["b5", "u3", "related_to"],
+    ["b6", "b5", "related_to"],
+    ["b6", "u2", "related_to"],
+    ["b7", "b6", "related_to"],
+    ["u4", "d4", "related_to"],
+    ["u4", "d5", "elaborates"],
+    ["u5", "u1", "related_to"],
+    ["b4", "d1", "related_to"],
     ["f2", "r1", "related_to"],
-    ["p1", "r2", "depends_on"],
-    ["d5", "f5", "related_to"],
   ];
 
   // ── palette read from CSS custom properties (theme-reactive) ───────────
@@ -412,7 +509,7 @@
 
   // ── 3D force-directed layout (settle synchronously, then orbit) ────────
   function settle(iterations) {
-    const REP = 42000, SPRING = 0.012, REST = 74, CENTER = 0.0032, DAMP = 0.86;
+    const REP = 34000, SPRING = 0.014, REST = 60, CENTER = 0.0046, DAMP = 0.86;
     for (let it = 0; it < iterations; it++) {
       for (let i = 0; i < nodes.length; i++) {
         const a = nodes[i];
@@ -443,7 +540,7 @@
       }
     }
   }
-  settle(520);
+  settle(640);
 
   // ── canvas / render ────────────────────────────────────────────────────
   const canvas = document.getElementById("graph");
