@@ -8,6 +8,7 @@
 [![MCP](https://img.shields.io/badge/MCP-server-f97316)](https://modelcontextprotocol.io/)
 [![🧠 thermal memory](https://img.shields.io/badge/%F0%9F%A7%A0-thermal%20memory-7C3AED)](./src/thermal.ts)
 [![live demo](https://img.shields.io/badge/live%20demo-3D%20graph-f97316?logo=github&logoColor=white)](https://effecet.github.io/memory-persistor/)
+[![explore the graph](https://img.shields.io/badge/%E2%96%B6%20explore-the%20live%20graph-7c3aed?logoColor=white)](https://effecet.github.io/memory-persistor/)
 
 A PostgreSQL-backed **MCP memory server** with thermal decay, a knowledge graph,
 and 9-signal hybrid retrieval — including **local semantic embeddings** (bge-small
@@ -15,7 +16,17 @@ via ONNX, in-process, offline) — a long-term memory for AI agents (e.g. Claude
 Code). Runs against any Postgres: a managed cloud instance (Supabase) or a local
 Docker container.
 
-> 🔮 **Live demo** — explore the memory graph in 3D → **[effecet.github.io/memory-persistor](https://effecet.github.io/memory-persistor/)**
+<p align="center">
+  <a href="https://effecet.github.io/memory-persistor/">
+    <img src="assets/graph-preview.gif" width="720"
+         alt="Interactive 3D knowledge graph — memories as nodes coloured by thermal tier (hot / warm / cold), linked by five typed relations, with activation flowing along the edges">
+  </a>
+</p>
+
+<p align="center">
+  <b><a href="https://effecet.github.io/memory-persistor/">▶ Explore the brain in 3D →</a></b><br>
+  <sub>drag to orbit · scroll / pinch to zoom · hover to inspect · <kbd>space</kbd> to pause · <em>sample data, fully anonymized</em></sub>
+</p>
 
 > A reusable scaffold. Point it at your own Postgres, run the migrations, and wire
 > it into your MCP client.

@@ -149,17 +149,21 @@
     padding: 1px 5px; background: var(--card);
   }
 
-  /* ── theme toggle ── */
-  #toggle {
+  /* ── controls (pause + theme) ── */
+  #controls {
     position: absolute; top: clamp(18px, 4vw, 40px); right: clamp(18px, 4vw, 44px); z-index: 4;
-    pointer-events: auto; cursor: pointer;
+    display: flex; gap: 8px; pointer-events: auto;
+  }
+  #toggle, #pause {
+    cursor: pointer;
     background: var(--card); border: 1px solid var(--card-brd); border-radius: 10px;
     color: var(--ink); font-family: var(--mono); font-size: 12px; letter-spacing: .05em;
     padding: 8px 13px; display: flex; align-items: center; gap: 8px;
     backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
   }
-  #toggle:hover { border-color: var(--accent); }
-  #toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  #toggle:hover, #pause:hover { border-color: var(--accent); }
+  #toggle:focus-visible, #pause:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  #pause[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 
   /* ── node tooltip ── */
   #tip {
@@ -215,9 +219,14 @@
 <div id="stage">
   <canvas id="graph" tabindex="0" aria-label="Interactive 3D knowledge graph of memory nodes connected by typed relations. Drag to orbit, hover a node for details."></canvas>
 
-  <button id="toggle" type="button" aria-label="Toggle light and dark theme">
-    <span id="toggle-icon" aria-hidden="true">&#9680;</span><span id="toggle-text">theme</span>
-  </button>
+  <div id="controls">
+    <button id="pause" type="button" aria-label="Pause orbit and flow" aria-pressed="false">
+      <span id="pause-icon" aria-hidden="true">&#10074;&#10074;</span><span id="pause-text">pause</span>
+    </button>
+    <button id="toggle" type="button" aria-label="Toggle light and dark theme">
+      <span id="toggle-icon" aria-hidden="true">&#9680;</span><span id="toggle-text">theme</span>
+    </button>
+  </div>
 
   <header id="masthead" class="overlay">
     <p class="eyebrow"><span class="dot"></span>memory-persistor &middot; the brain</p>
@@ -270,77 +279,148 @@
   // five typed relations. Content is deliberately generic engineering lore.
   const TIER = { HOT: "hot", WARM: "warm", COLD: "cold" };
   const N = [
-    // decisions
-    { id: "d1", label: "Use pgvector for search", type: "decision", tier: TIER.HOT },
-    { id: "d2", label: "Postgres over a new store", type: "decision", tier: TIER.WARM },
-    { id: "d3", label: "Monorepo layout", type: "decision", tier: TIER.COLD },
-    { id: "d4", label: "In-process ONNX embeds", type: "decision", tier: TIER.HOT },
-    { id: "d5", label: "Dev-only embed-on-write", type: "decision", tier: TIER.WARM },
-    { id: "d6", label: "Cosine over trigram dedup", type: "decision", tier: TIER.WARM },
-    { id: "d7", label: "Thermal decay for memory", type: "decision", tier: TIER.HOT },
-    { id: "d8", label: "Typed knowledge-graph edges", type: "decision", tier: TIER.WARM },
-    { id: "d9", label: "Real DB in integration tests", type: "decision", tier: TIER.WARM },
-    { id: "d10", label: "Feature-flag risky writes", type: "decision", tier: TIER.COLD },
-    { id: "d11", label: "Grace window before alerts", type: "decision", tier: TIER.COLD },
-    { id: "d12", label: "9-signal hybrid recall", type: "decision", tier: TIER.HOT },
-    // projects
-    { id: "p1", label: "Search ranking v2", type: "project", tier: TIER.HOT },
-    { id: "p2", label: "Billing migration", type: "project", tier: TIER.COLD },
-    { id: "p3", label: "Auth service rewrite", type: "project", tier: TIER.WARM },
-    { id: "p4", label: "Nightly decay job", type: "project", tier: TIER.WARM },
-    { id: "p5", label: "Graph traversal API", type: "project", tier: TIER.HOT },
-    { id: "p6", label: "Embedding backfill", type: "project", tier: TIER.WARM },
-    { id: "p7", label: "Brain canary monitor", type: "project", tier: TIER.COLD },
-    { id: "p8", label: "Dedup review tool", type: "project", tier: TIER.COLD },
-    // facts
-    { id: "f1", label: "bge-small is 384-d", type: "fact", tier: TIER.HOT },
-    { id: "f2", label: "Cosine is not Euclidean", type: "fact", tier: TIER.WARM },
-    { id: "f3", label: "pg_trgm needs a GIN index", type: "fact", tier: TIER.COLD },
-    { id: "f4", label: "fp32 is cross-OS stable", type: "fact", tier: TIER.HOT },
-    { id: "f5", label: "q8 diverges across builds", type: "fact", tier: TIER.WARM },
-    { id: "f6", label: "HNSW pays off past ~10k", type: "fact", tier: TIER.COLD },
-    { id: "f7", label: "L2-normalized dot = cosine", type: "fact", tier: TIER.WARM },
-    { id: "f8", label: "tsvector ranks by frequency", type: "fact", tier: TIER.COLD },
-    { id: "f9", label: "ONNX needs no GPU", type: "fact", tier: TIER.WARM },
-    { id: "f10", label: "Warm the model at boot", type: "fact", tier: TIER.WARM },
-    { id: "f11", label: "NULLs are safe to backfill", type: "fact", tier: TIER.COLD },
-    // patterns
-    { id: "t1", label: "Retry with backoff", type: "pattern", tier: TIER.WARM },
-    { id: "t2", label: "Idempotent writes", type: "pattern", tier: TIER.WARM },
-    { id: "t3", label: "Cache-aside reads", type: "pattern", tier: TIER.COLD },
-    { id: "t4", label: "Non-fatal side effects", type: "pattern", tier: TIER.HOT },
-    { id: "t5", label: "Fail open, log loud", type: "pattern", tier: TIER.WARM },
-    { id: "t6", label: "Debounce noisy alerts", type: "pattern", tier: TIER.COLD },
-    { id: "t7", label: "Snapshot before update", type: "pattern", tier: TIER.WARM },
-    { id: "t8", label: "Batch then flush", type: "pattern", tier: TIER.COLD },
-    // feedback
-    { id: "b1", label: "Prefer explicit types", type: "feedback", tier: TIER.WARM },
-    { id: "b2", label: "Small PRs merge faster", type: "feedback", tier: TIER.COLD },
-    { id: "b3", label: "Write the test first", type: "feedback", tier: TIER.HOT },
-    { id: "b4", label: "Never auto-merge dupes", type: "feedback", tier: TIER.WARM },
-    { id: "b5", label: "Propose before acting", type: "feedback", tier: TIER.HOT },
-    { id: "b6", label: "Verify on main first", type: "feedback", tier: TIER.WARM },
-    { id: "b7", label: "Refresh docs before push", type: "feedback", tier: TIER.COLD },
-    // references
-    { id: "r1", label: "pgvector docs", type: "reference", tier: TIER.COLD },
-    { id: "r2", label: "MCP specification", type: "reference", tier: TIER.WARM },
-    { id: "r3", label: "Drizzle ORM guide", type: "reference", tier: TIER.COLD },
-    { id: "r4", label: "Transformers.js README", type: "reference", tier: TIER.WARM },
-    { id: "r5", label: "Postgres FTS manual", type: "reference", tier: TIER.COLD },
-    { id: "r6", label: "ONNX Runtime docs", type: "reference", tier: TIER.COLD },
-    { id: "r7", label: "pg_cron scheduling", type: "reference", tier: TIER.COLD },
-    // user
-    { id: "u1", label: "Prefers CLI tools", type: "user", tier: TIER.WARM },
-    { id: "u2", label: "Reviews own diffs", type: "user", tier: TIER.COLD },
-    { id: "u3", label: "Ships small, ships daily", type: "user", tier: TIER.HOT },
-    { id: "u4", label: "Privacy-first by default", type: "user", tier: TIER.WARM },
-    { id: "u5", label: "Solo operator", type: "user", tier: TIER.COLD },
-    // superseded / contradicted anchors
-    { id: "x1", label: "Full-text search only", type: "decision", tier: TIER.COLD },
-    { id: "x2", label: "Store vectors elsewhere", type: "decision", tier: TIER.COLD },
-    { id: "x3", label: "Embed on every machine", type: "decision", tier: TIER.COLD },
-    { id: "x4", label: "Mock the DB in tests", type: "decision", tier: TIER.COLD },
-    { id: "x5", label: "One giant PR", type: "decision", tier: TIER.COLD },
+    // Sample knowledge graph — anonymized: real topology from a 575-node
+    // memory graph, every label synthesized (no private content). 140 / 314.
+    {"id": "n0", "label": "Zod schema validation", "type": "reference", "tier": "hot"},
+    {"id": "n1", "label": "Backfill resume support", "type": "project", "tier": "hot"},
+    {"id": "n2", "label": "Auto-relate on write", "type": "project", "tier": "hot"},
+    {"id": "n3", "label": "Nightly decay schedule", "type": "project", "tier": "hot"},
+    {"id": "n4", "label": "Offline single-file demo", "type": "project", "tier": "hot"},
+    {"id": "n5", "label": "MCP transport spec", "type": "reference", "tier": "hot"},
+    {"id": "n6", "label": "Embedding parity spike", "type": "project", "tier": "hot"},
+    {"id": "n7", "label": "Keep stdout clean for transport", "type": "feedback", "tier": "hot"},
+    {"id": "n8", "label": "Particle-flow animation", "type": "project", "tier": "hot"},
+    {"id": "n9", "label": "Nightly decay at 06:00 UTC", "type": "fact", "tier": "hot"},
+    {"id": "n10", "label": "Retrieval scoring v2", "type": "project", "tier": "hot"},
+    {"id": "n11", "label": "Import pipeline hardening", "type": "project", "tier": "hot"},
+    {"id": "n12", "label": "Force-directed layout params", "type": "reference", "tier": "hot"},
+    {"id": "n13", "label": "Fleet sync across machines", "type": "project", "tier": "hot"},
+    {"id": "n14", "label": "Dashboard export pipeline", "type": "project", "tier": "hot"},
+    {"id": "n15", "label": "Prefers proposing over asking", "type": "user", "tier": "hot"},
+    {"id": "n16", "label": "Health orphan report", "type": "project", "tier": "hot"},
+    {"id": "n17", "label": "Access-frequency signal", "type": "project", "tier": "hot"},
+    {"id": "n18", "label": "Flag destructive ops loudly", "type": "feedback", "tier": "hot"},
+    {"id": "n19", "label": "JSONB indexing notes", "type": "reference", "tier": "hot"},
+    {"id": "n20", "label": "Relation-type legend", "type": "project", "tier": "warm"},
+    {"id": "n21", "label": "Public scaffold cleanup", "type": "project", "tier": "warm"},
+    {"id": "n22", "label": "Mermaid flowchart syntax", "type": "reference", "tier": "warm"},
+    {"id": "n23", "label": "Ask before force-pushing", "type": "feedback", "tier": "warm"},
+    {"id": "n24", "label": "Degree-based tiering", "type": "project", "tier": "warm"},
+    {"id": "n25", "label": "Recall response cap", "type": "project", "tier": "warm"},
+    {"id": "n26", "label": "Coverage monitor alerts", "type": "project", "tier": "warm"},
+    {"id": "n27", "label": "Two-tier freshness verdict", "type": "project", "tier": "warm"},
+    {"id": "n28", "label": "Hybrid recall weighting", "type": "project", "tier": "warm"},
+    {"id": "n29", "label": "Reduced-motion accessibility", "type": "reference", "tier": "warm"},
+    {"id": "n30", "label": "Wrap-up gate rollout", "type": "project", "tier": "warm"},
+    {"id": "n31", "label": "Mobile layout pass", "type": "project", "tier": "warm"},
+    {"id": "n32", "label": "Graph centrality signal", "type": "project", "tier": "warm"},
+    {"id": "n33", "label": "Scoring weight calibration", "type": "project", "tier": "warm"},
+    {"id": "n34", "label": "Cold-start latency fix", "type": "project", "tier": "warm"},
+    {"id": "n35", "label": "Thermal decay tuning", "type": "project", "tier": "warm"},
+    {"id": "n36", "label": "Validate inputs at the edge", "type": "feedback", "tier": "warm"},
+    {"id": "n37", "label": "Merge-and-version flow", "type": "project", "tier": "warm"},
+    {"id": "n38", "label": "Prefers-color-scheme media query", "type": "reference", "tier": "warm"},
+    {"id": "n39", "label": "Semantic embeddings rollout", "type": "project", "tier": "warm"},
+    {"id": "n40", "label": "Canary heartbeat monitor", "type": "project", "tier": "warm"},
+    {"id": "n41", "label": "Painter's algorithm depth", "type": "reference", "tier": "warm"},
+    {"id": "n42", "label": "Query-time embed path", "type": "project", "tier": "warm"},
+    {"id": "n43", "label": "Docker healthcheck intervals", "type": "reference", "tier": "warm"},
+    {"id": "n44", "label": "Drizzle migration guide", "type": "reference", "tier": "warm"},
+    {"id": "n45", "label": "Event freshness checks", "type": "project", "tier": "warm"},
+    {"id": "n46", "label": "pgvector cosine ops", "type": "reference", "tier": "warm"},
+    {"id": "n47", "label": "Ships small daily", "type": "user", "tier": "warm"},
+    {"id": "n48", "label": "Forgejo Actions API", "type": "reference", "tier": "warm"},
+    {"id": "n49", "label": "Sample-graph generator", "type": "project", "tier": "warm"},
+    {"id": "n50", "label": "3D graph showcase", "type": "project", "tier": "warm"},
+    {"id": "n51", "label": "Escalate when confidence is low", "type": "feedback", "tier": "warm"},
+    {"id": "n52", "label": "Retry budget guidance", "type": "reference", "tier": "warm"},
+    {"id": "n53", "label": "Cross-machine backup", "type": "project", "tier": "warm"},
+    {"id": "n54", "label": "Cursor-based pagination", "type": "reference", "tier": "warm"},
+    {"id": "n55", "label": "Batch independent calls", "type": "feedback", "tier": "warm"},
+    {"id": "n56", "label": "Vector backfill job", "type": "project", "tier": "warm"},
+    {"id": "n57", "label": "Idempotency-key pattern", "type": "reference", "tier": "warm"},
+    {"id": "n58", "label": "Dev-only-embed gating", "type": "project", "tier": "warm"},
+    {"id": "n59", "label": "Conflict detection sweep", "type": "project", "tier": "warm"},
+    {"id": "n60", "label": "Near-duplicate dedup pass", "type": "project", "tier": "warm"},
+    {"id": "n61", "label": "Stale-memory pruning", "type": "project", "tier": "warm"},
+    {"id": "n62", "label": "Warm framing over cold", "type": "feedback", "tier": "cold"},
+    {"id": "n63", "label": "SSE keep-alive tuning", "type": "reference", "tier": "cold"},
+    {"id": "n64", "label": "Keep commits scoped", "type": "feedback", "tier": "cold"},
+    {"id": "n65", "label": "ETag conditional requests", "type": "reference", "tier": "cold"},
+    {"id": "n66", "label": "Connection pool sizing", "type": "reference", "tier": "cold"},
+    {"id": "n67", "label": "Verify tool availability first", "type": "feedback", "tier": "cold"},
+    {"id": "n68", "label": "Summary-mode projection", "type": "project", "tier": "cold"},
+    {"id": "n69", "label": "Prefer explicit return types", "type": "feedback", "tier": "cold"},
+    {"id": "n70", "label": "Supavisor transaction mode", "type": "reference", "tier": "cold"},
+    {"id": "n71", "label": "Topic-cluster layout", "type": "project", "tier": "cold"},
+    {"id": "n72", "label": "Backfill resume support · notes", "type": "project", "tier": "cold"},
+    {"id": "n73", "label": "OAuth device flow notes", "type": "reference", "tier": "cold"},
+    {"id": "n74", "label": "Re-stage after late edits", "type": "feedback", "tier": "cold"},
+    {"id": "n75", "label": "SVG path length API", "type": "reference", "tier": "cold"},
+    {"id": "n76", "label": "Guard against silent drift", "type": "feedback", "tier": "cold"},
+    {"id": "n77", "label": "Auto-relate on write · notes", "type": "project", "tier": "cold"},
+    {"id": "n78", "label": "Nightly decay schedule · notes", "type": "project", "tier": "cold"},
+    {"id": "n79", "label": "Offline single-file demo · notes", "type": "project", "tier": "cold"},
+    {"id": "n80", "label": "Embedding parity spike · notes", "type": "project", "tier": "cold"},
+    {"id": "n81", "label": "systemd timer syntax", "type": "reference", "tier": "cold"},
+    {"id": "n82", "label": "Particle-flow animation · notes", "type": "project", "tier": "cold"},
+    {"id": "n83", "label": "Shorten memory names to five words", "type": "feedback", "tier": "cold"},
+    {"id": "n84", "label": "Prefer clarity over cleverness", "type": "feedback", "tier": "cold"},
+    {"id": "n85", "label": "Warm, non-political framing", "type": "user", "tier": "cold"},
+    {"id": "n86", "label": "RLS policy patterns", "type": "reference", "tier": "cold"},
+    {"id": "n87", "label": "Semantic versioning ranges", "type": "reference", "tier": "cold"},
+    {"id": "n88", "label": "Retrieval scoring v2 · notes", "type": "project", "tier": "cold"},
+    {"id": "n89", "label": "Log decisions, not noise", "type": "feedback", "tier": "cold"},
+    {"id": "n90", "label": "Canvas 2D perspective math", "type": "reference", "tier": "cold"},
+    {"id": "n91", "label": "Trigram index tuning", "type": "reference", "tier": "cold"},
+    {"id": "n92", "label": "Never trust unbounded output", "type": "feedback", "tier": "cold"},
+    {"id": "n93", "label": "Import pipeline hardening · notes", "type": "project", "tier": "cold"},
+    {"id": "n94", "label": "Fleet sync across machines · notes", "type": "project", "tier": "cold"},
+    {"id": "n95", "label": "Cite sources for external claims", "type": "feedback", "tier": "cold"},
+    {"id": "n96", "label": "Dashboard export pipeline · notes", "type": "project", "tier": "cold"},
+    {"id": "n97", "label": "Health orphan report · notes", "type": "project", "tier": "cold"},
+    {"id": "n98", "label": "CSS custom properties scope", "type": "reference", "tier": "cold"},
+    {"id": "n99", "label": "Access-frequency signal · notes", "type": "project", "tier": "cold"},
+    {"id": "n100", "label": "Write the test first", "type": "feedback", "tier": "cold"},
+    {"id": "n101", "label": "Keep the diff reviewable", "type": "feedback", "tier": "cold"},
+    {"id": "n102", "label": "ESM vs CommonJS notes", "type": "reference", "tier": "cold"},
+    {"id": "n103", "label": "Respect reduced-motion settings", "type": "feedback", "tier": "cold"},
+    {"id": "n104", "label": "Prefer idempotent operations", "type": "feedback", "tier": "cold"},
+    {"id": "n105", "label": "Measure before optimizing", "type": "feedback", "tier": "cold"},
+    {"id": "n106", "label": "ONNX opset compatibility", "type": "reference", "tier": "cold"},
+    {"id": "n107", "label": "Relation-type legend · notes", "type": "project", "tier": "cold"},
+    {"id": "n108", "label": "Public scaffold cleanup · notes", "type": "project", "tier": "cold"},
+    {"id": "n109", "label": "Skip docs when trivial", "type": "feedback", "tier": "cold"},
+    {"id": "n110", "label": "GitHub Actions cache keys", "type": "reference", "tier": "cold"},
+    {"id": "n111", "label": "Size the plan to the change", "type": "feedback", "tier": "cold"},
+    {"id": "n112", "label": "Degree-based tiering · notes", "type": "project", "tier": "cold"},
+    {"id": "n113", "label": "Recall response cap · notes", "type": "project", "tier": "cold"},
+    {"id": "n114", "label": "Solo operator", "type": "user", "tier": "cold"},
+    {"id": "n115", "label": "Vector quantization notes", "type": "reference", "tier": "cold"},
+    {"id": "n116", "label": "ON CONFLICT upsert idiom", "type": "reference", "tier": "cold"},
+    {"id": "n117", "label": "Pointer events capture", "type": "reference", "tier": "cold"},
+    {"id": "n118", "label": "Coverage monitor alerts · notes", "type": "project", "tier": "cold"},
+    {"id": "n119", "label": "Delete orphaned duplicates", "type": "feedback", "tier": "cold"},
+    {"id": "n120", "label": "Two-tier freshness verdict · notes", "type": "project", "tier": "cold"},
+    {"id": "n121", "label": "Cosine vs dot-product notes", "type": "reference", "tier": "cold"},
+    {"id": "n122", "label": "Postgres FTS config", "type": "reference", "tier": "cold"},
+    {"id": "n123", "label": "TLS SNI and pooling", "type": "reference", "tier": "cold"},
+    {"id": "n124", "label": "DevicePixelRatio scaling", "type": "reference", "tier": "cold"},
+    {"id": "n125", "label": "Never commit env files", "type": "feedback", "tier": "cold"},
+    {"id": "n126", "label": "Node dynamic import cost", "type": "reference", "tier": "cold"},
+    {"id": "n127", "label": "uv venv install flow", "type": "reference", "tier": "cold"},
+    {"id": "n128", "label": "Hybrid recall weighting · notes", "type": "project", "tier": "cold"},
+    {"id": "n129", "label": "Treat shared state as fragile", "type": "feedback", "tier": "cold"},
+    {"id": "n130", "label": "Prefer additive migrations", "type": "feedback", "tier": "cold"},
+    {"id": "n131", "label": "Surface risks before proceeding", "type": "feedback", "tier": "cold"},
+    {"id": "n132", "label": "gen_random_uuid usage", "type": "reference", "tier": "cold"},
+    {"id": "n133", "label": "Diagnose with a known-good control", "type": "feedback", "tier": "cold"},
+    {"id": "n134", "label": "Prefer composition over cleverness", "type": "feedback", "tier": "cold"},
+    {"id": "n135", "label": "Propose before executing", "type": "feedback", "tier": "cold"},
+    {"id": "n136", "label": "Backoff-and-jitter recipe", "type": "reference", "tier": "cold"},
+    {"id": "n137", "label": "Avoid mutable default args", "type": "feedback", "tier": "cold"},
+    {"id": "n138", "label": "Values clarity over cleverness", "type": "user", "tier": "cold"},
+    {"id": "n139", "label": "Proposes before acting", "type": "user", "tier": "cold"},
   ];
 
   const REL = {
@@ -352,108 +432,320 @@
   };
 
   const E = [
-    // embeddings & vectors
-    ["d1", "x1", "supersedes"],
-    ["d1", "f1", "elaborates"],
-    ["d1", "r1", "related_to"],
-    ["d1", "d12", "elaborates"],
-    ["f1", "f2", "related_to"],
-    ["f1", "f4", "related_to"],
-    ["f1", "f7", "related_to"],
-    ["f7", "f2", "elaborates"],
-    ["d4", "f4", "elaborates"],
-    ["d4", "f5", "elaborates"],
-    ["f4", "f5", "contradicts"],
-    ["d4", "f9", "related_to"],
-    ["d4", "r4", "related_to"],
-    ["d4", "r6", "related_to"],
-    ["f10", "d4", "elaborates"],
-    ["f9", "r6", "related_to"],
-    ["f6", "d1", "elaborates"],
-    ["f6", "f3", "related_to"],
-    ["f6", "r1", "related_to"],
-    // recall & search
-    ["d12", "f8", "elaborates"],
-    ["f8", "r5", "related_to"],
-    ["p1", "d1", "depends_on"],
-    ["p1", "d12", "depends_on"],
-    ["p1", "f3", "depends_on"],
-    ["p1", "r2", "depends_on"],
-    ["b3", "p1", "elaborates"],
-    ["p5", "d8", "depends_on"],
-    ["p5", "d1", "related_to"],
-    ["p5", "r2", "related_to"],
-    // dedup
-    ["d6", "x1", "supersedes"],
-    ["d6", "f7", "elaborates"],
-    ["d6", "b4", "related_to"],
-    ["p8", "d6", "depends_on"],
-    ["p8", "f2", "related_to"],
-    // dev-only embed & backfill
-    ["d5", "x3", "supersedes"],
-    ["d5", "u4", "related_to"],
-    ["d5", "f5", "related_to"],
-    ["d5", "f11", "elaborates"],
-    ["p6", "d5", "depends_on"],
-    ["p6", "f10", "related_to"],
-    ["p6", "f11", "depends_on"],
-    // database
-    ["d2", "x2", "supersedes"],
-    ["d2", "d1", "related_to"],
-    ["d2", "r5", "related_to"],
-    ["d3", "r3", "related_to"],
-    ["p2", "d3", "depends_on"],
-    // thermal & decay
-    ["d7", "p4", "related_to"],
-    ["p4", "d5", "depends_on"],
-    ["p4", "t7", "related_to"],
-    ["p4", "r7", "depends_on"],
-    ["r7", "d7", "related_to"],
-    ["d7", "t7", "related_to"],
-    // knowledge graph
-    ["d8", "p5", "related_to"],
-    ["d8", "t7", "related_to"],
-    ["d8", "r3", "related_to"],
-    // agent / MCP
-    ["r2", "d4", "related_to"],
-    ["r2", "d12", "related_to"],
-    // patterns
-    ["p3", "t1", "depends_on"],
-    ["p3", "t2", "depends_on"],
-    ["t2", "t4", "related_to"],
-    ["t2", "t7", "elaborates"],
-    ["p4", "t4", "depends_on"],
-    ["t1", "t3", "related_to"],
-    ["t1", "t8", "related_to"],
-    ["t5", "t4", "related_to"],
-    ["t4", "d4", "related_to"],
-    ["t3", "t8", "related_to"],
-    // canary
-    ["p7", "t6", "depends_on"],
-    ["p7", "d11", "related_to"],
-    ["p7", "t5", "related_to"],
-    ["p7", "f10", "related_to"],
-    ["d11", "t6", "elaborates"],
-    ["p7", "d7", "related_to"],
-    // testing
-    ["d9", "x4", "supersedes"],
-    ["d9", "b3", "related_to"],
-    ["b3", "b5", "elaborates"],
-    ["b3", "u3", "related_to"],
-    ["d10", "t4", "related_to"],
-    // feedback & user
-    ["b1", "u2", "related_to"],
-    ["b2", "u1", "related_to"],
-    ["b2", "x5", "contradicts"],
-    ["b5", "u3", "related_to"],
-    ["b6", "b5", "related_to"],
-    ["b6", "u2", "related_to"],
-    ["b7", "b6", "related_to"],
-    ["u4", "d4", "related_to"],
-    ["u4", "d5", "elaborates"],
-    ["u5", "u1", "related_to"],
-    ["b4", "d1", "related_to"],
-    ["f2", "r1", "related_to"],
+    ["n2", "n3", "related_to"],
+    ["n34", "n3", "depends_on"],
+    ["n139", "n3", "depends_on"],
+    ["n100", "n14", "depends_on"],
+    ["n100", "n3", "related_to"],
+    ["n130", "n18", "related_to"],
+    ["n130", "n31", "depends_on"],
+    ["n130", "n7", "depends_on"],
+    ["n15", "n18", "related_to"],
+    ["n15", "n31", "related_to"],
+    ["n15", "n7", "related_to"],
+    ["n15", "n2", "elaborates"],
+    ["n15", "n9", "elaborates"],
+    ["n15", "n23", "related_to"],
+    ["n18", "n47", "related_to"],
+    ["n18", "n31", "related_to"],
+    ["n18", "n7", "related_to"],
+    ["n18", "n2", "depends_on"],
+    ["n18", "n9", "related_to"],
+    ["n18", "n23", "related_to"],
+    ["n47", "n14", "related_to"],
+    ["n47", "n114", "supersedes"],
+    ["n47", "n23", "related_to"],
+    ["n14", "n31", "related_to"],
+    ["n14", "n114", "contradicts"],
+    ["n31", "n7", "elaborates"],
+    ["n31", "n2", "related_to"],
+    ["n31", "n9", "related_to"],
+    ["n31", "n23", "related_to"],
+    ["n3", "n122", "related_to"],
+    ["n3", "n9", "related_to"],
+    ["n7", "n2", "related_to"],
+    ["n7", "n9", "related_to"],
+    ["n7", "n23", "related_to"],
+    ["n2", "n122", "related_to"],
+    ["n2", "n9", "elaborates"],
+    ["n2", "n23", "related_to"],
+    ["n122", "n9", "depends_on"],
+    ["n9", "n23", "depends_on"],
+    ["n62", "n2", "related_to"],
+    ["n62", "n9", "related_to"],
+    ["n51", "n2", "elaborates"],
+    ["n51", "n23", "related_to"],
+    ["n46", "n2", "related_to"],
+    ["n46", "n14", "depends_on"],
+    ["n54", "n2", "related_to"],
+    ["n54", "n7", "related_to"],
+    ["n35", "n3", "elaborates"],
+    ["n35", "n2", "elaborates"],
+    ["n97", "n0", "related_to"],
+    ["n97", "n128", "related_to"],
+    ["n97", "n2", "related_to"],
+    ["n96", "n8", "related_to"],
+    ["n96", "n41", "related_to"],
+    ["n77", "n2", "elaborates"],
+    ["n77", "n34", "elaborates"],
+    ["n8", "n2", "depends_on"],
+    ["n8", "n105", "related_to"],
+    ["n119", "n2", "related_to"],
+    ["n119", "n62", "related_to"],
+    ["n105", "n3", "depends_on"],
+    ["n118", "n58", "related_to"],
+    ["n37", "n3", "related_to"],
+    ["n63", "n14", "related_to"],
+    ["n63", "n15", "related_to"],
+    ["n0", "n2", "related_to"],
+    ["n0", "n3", "related_to"],
+    ["n29", "n2", "depends_on"],
+    ["n29", "n0", "related_to"],
+    ["n12", "n2", "depends_on"],
+    ["n12", "n0", "related_to"],
+    ["n67", "n3", "related_to"],
+    ["n67", "n9", "depends_on"],
+    ["n118", "n26", "depends_on"],
+    ["n70", "n58", "depends_on"],
+    ["n107", "n2", "depends_on"],
+    ["n107", "n0", "depends_on"],
+    ["n82", "n2", "related_to"],
+    ["n82", "n107", "related_to"],
+    ["n64", "n2", "related_to"],
+    ["n64", "n105", "related_to"],
+    ["n117", "n0", "related_to"],
+    ["n117", "n29", "related_to"],
+    ["n52", "n3", "depends_on"],
+    ["n52", "n79", "related_to"],
+    ["n59", "n82", "supersedes"],
+    ["n59", "n52", "related_to"],
+    ["n70", "n2", "related_to"],
+    ["n43", "n41", "depends_on"],
+    ["n43", "n0", "depends_on"],
+    ["n40", "n34", "related_to"],
+    ["n90", "n35", "elaborates"],
+    ["n90", "n7", "related_to"],
+    ["n88", "n2", "related_to"],
+    ["n80", "n2", "depends_on"],
+    ["n80", "n58", "related_to"],
+    ["n5", "n2", "related_to"],
+    ["n125", "n52", "elaborates"],
+    ["n125", "n79", "related_to"],
+    ["n80", "n118", "related_to"],
+    ["n65", "n90", "related_to"],
+    ["n30", "n59", "depends_on"],
+    ["n30", "n82", "related_to"],
+    ["n81", "n2", "depends_on"],
+    ["n81", "n0", "related_to"],
+    ["n1", "n30", "related_to"],
+    ["n87", "n0", "related_to"],
+    ["n87", "n81", "elaborates"],
+    ["n86", "n28", "related_to"],
+    ["n56", "n2", "related_to"],
+    ["n56", "n0", "depends_on"],
+    ["n86", "n110", "related_to"],
+    ["n20", "n0", "related_to"],
+    ["n20", "n2", "elaborates"],
+    ["n4", "n1", "related_to"],
+    ["n4", "n0", "related_to"],
+    ["n45", "n0", "related_to"],
+    ["n48", "n2", "depends_on"],
+    ["n48", "n56", "related_to"],
+    ["n6", "n4", "elaborates"],
+    ["n6", "n1", "related_to"],
+    ["n124", "n45", "related_to"],
+    ["n124", "n1", "elaborates"],
+    ["n44", "n45", "related_to"],
+    ["n44", "n124", "related_to"],
+    ["n22", "n0", "elaborates"],
+    ["n22", "n44", "related_to"],
+    ["n22", "n124", "elaborates"],
+    ["n128", "n70", "depends_on"],
+    ["n128", "n2", "depends_on"],
+    ["n36", "n0", "related_to"],
+    ["n36", "n4", "related_to"],
+    ["n36", "n100", "related_to"],
+    ["n16", "n4", "depends_on"],
+    ["n16", "n1", "depends_on"],
+    ["n115", "n0", "depends_on"],
+    ["n115", "n4", "related_to"],
+    ["n78", "n1", "related_to"],
+    ["n78", "n4", "depends_on"],
+    ["n78", "n115", "elaborates"],
+    ["n78", "n16", "elaborates"],
+    ["n60", "n0", "depends_on"],
+    ["n60", "n1", "elaborates"],
+    ["n94", "n1", "related_to"],
+    ["n94", "n0", "elaborates"],
+    ["n60", "n16", "related_to"],
+    ["n60", "n94", "supersedes"],
+    ["n60", "n78", "contradicts"],
+    ["n94", "n16", "related_to"],
+    ["n85", "n0", "related_to"],
+    ["n85", "n4", "related_to"],
+    ["n83", "n6", "related_to"],
+    ["n83", "n1", "related_to"],
+    ["n71", "n114", "elaborates"],
+    ["n71", "n83", "elaborates"],
+    ["n113", "n20", "related_to"],
+    ["n113", "n6", "elaborates"],
+    ["n133", "n2", "related_to"],
+    ["n32", "n0", "related_to"],
+    ["n32", "n1", "depends_on"],
+    ["n109", "n5", "depends_on"],
+    ["n109", "n12", "related_to"],
+    ["n32", "n14", "related_to"],
+    ["n109", "n14", "related_to"],
+    ["n99", "n4", "related_to"],
+    ["n99", "n32", "elaborates"],
+    ["n10", "n1", "elaborates"],
+    ["n10", "n6", "related_to"],
+    ["n39", "n6", "elaborates"],
+    ["n39", "n10", "related_to"],
+    ["n42", "n6", "related_to"],
+    ["n42", "n99", "related_to"],
+    ["n101", "n2", "related_to"],
+    ["n101", "n0", "depends_on"],
+    ["n89", "n42", "depends_on"],
+    ["n89", "n101", "related_to"],
+    ["n111", "n1", "depends_on"],
+    ["n111", "n14", "related_to"],
+    ["n68", "n1", "related_to"],
+    ["n68", "n6", "related_to"],
+    ["n61", "n1", "related_to"],
+    ["n61", "n6", "depends_on"],
+    ["n95", "n0", "elaborates"],
+    ["n95", "n61", "depends_on"],
+    ["n95", "n111", "depends_on"],
+    ["n132", "n0", "related_to"],
+    ["n132", "n48", "related_to"],
+    ["n69", "n1", "related_to"],
+    ["n69", "n3", "elaborates"],
+    ["n134", "n10", "depends_on"],
+    ["n134", "n1", "related_to"],
+    ["n25", "n39", "elaborates"],
+    ["n25", "n5", "related_to"],
+    ["n25", "n8", "depends_on"],
+    ["n104", "n25", "depends_on"],
+    ["n104", "n0", "depends_on"],
+    ["n21", "n1", "elaborates"],
+    ["n21", "n6", "depends_on"],
+    ["n21", "n69", "related_to"],
+    ["n5", "n29", "elaborates"],
+    ["n5", "n117", "related_to"],
+    ["n88", "n29", "depends_on"],
+    ["n65", "n0", "elaborates"],
+    ["n65", "n100", "depends_on"],
+    ["n57", "n12", "elaborates"],
+    ["n57", "n0", "related_to"],
+    ["n57", "n1", "elaborates"],
+    ["n84", "n0", "related_to"],
+    ["n84", "n2", "depends_on"],
+    ["n84", "n132", "depends_on"],
+    ["n74", "n1", "related_to"],
+    ["n74", "n4", "elaborates"],
+    ["n126", "n57", "related_to"],
+    ["n126", "n1", "related_to"],
+    ["n126", "n0", "elaborates"],
+    ["n74", "n126", "related_to"],
+    ["n116", "n5", "related_to"],
+    ["n116", "n3", "related_to"],
+    ["n116", "n15", "related_to"],
+    ["n13", "n16", "depends_on"],
+    ["n13", "n6", "depends_on"],
+    ["n33", "n0", "related_to"],
+    ["n33", "n13", "elaborates"],
+    ["n103", "n0", "related_to"],
+    ["n103", "n12", "depends_on"],
+    ["n108", "n2", "related_to"],
+    ["n108", "n0", "depends_on"],
+    ["n11", "n0", "related_to"],
+    ["n11", "n2", "depends_on"],
+    ["n72", "n2", "related_to"],
+    ["n72", "n0", "depends_on"],
+    ["n72", "n108", "related_to"],
+    ["n72", "n11", "related_to"],
+    ["n103", "n72", "related_to"],
+    ["n103", "n11", "elaborates"],
+    ["n108", "n11", "related_to"],
+    ["n66", "n4", "elaborates"],
+    ["n66", "n1", "related_to"],
+    ["n76", "n5", "related_to"],
+    ["n76", "n1", "related_to"],
+    ["n73", "n76", "related_to"],
+    ["n73", "n3", "elaborates"],
+    ["n24", "n3", "related_to"],
+    ["n24", "n76", "contradicts"],
+    ["n73", "n66", "related_to"],
+    ["n24", "n73", "supersedes"],
+    ["n38", "n10", "elaborates"],
+    ["n38", "n5", "elaborates"],
+    ["n38", "n24", "related_to"],
+    ["n38", "n3", "related_to"],
+    ["n19", "n38", "elaborates"],
+    ["n19", "n5", "related_to"],
+    ["n28", "n5", "related_to"],
+    ["n28", "n19", "depends_on"],
+    ["n129", "n0", "elaborates"],
+    ["n129", "n19", "related_to"],
+    ["n110", "n28", "related_to"],
+    ["n110", "n0", "related_to"],
+    ["n110", "n19", "related_to"],
+    ["n112", "n1", "related_to"],
+    ["n112", "n13", "related_to"],
+    ["n27", "n1", "related_to"],
+    ["n27", "n2", "depends_on"],
+    ["n91", "n24", "elaborates"],
+    ["n91", "n27", "depends_on"],
+    ["n55", "n24", "elaborates"],
+    ["n55", "n69", "related_to"],
+    ["n121", "n19", "related_to"],
+    ["n121", "n28", "related_to"],
+    ["n127", "n38", "related_to"],
+    ["n127", "n28", "related_to"],
+    ["n127", "n19", "related_to"],
+    ["n136", "n1", "elaborates"],
+    ["n136", "n19", "related_to"],
+    ["n131", "n5", "related_to"],
+    ["n131", "n12", "related_to"],
+    ["n137", "n19", "related_to"],
+    ["n137", "n44", "depends_on"],
+    ["n75", "n1", "elaborates"],
+    ["n75", "n4", "related_to"],
+    ["n106", "n0", "related_to"],
+    ["n106", "n12", "related_to"],
+    ["n93", "n13", "elaborates"],
+    ["n93", "n129", "related_to"],
+    ["n135", "n5", "elaborates"],
+    ["n135", "n11", "elaborates"],
+    ["n53", "n0", "elaborates"],
+    ["n123", "n53", "related_to"],
+    ["n138", "n85", "related_to"],
+    ["n138", "n3", "related_to"],
+    ["n138", "n53", "related_to"],
+    ["n50", "n0", "related_to"],
+    ["n41", "n0", "depends_on"],
+    ["n41", "n12", "related_to"],
+    ["n49", "n0", "related_to"],
+    ["n102", "n49", "elaborates"],
+    ["n102", "n5", "related_to"],
+    ["n49", "n53", "elaborates"],
+    ["n102", "n123", "related_to"],
+    ["n120", "n0", "related_to"],
+    ["n50", "n2", "elaborates"],
+    ["n50", "n34", "related_to"],
+    ["n40", "n50", "elaborates"],
+    ["n88", "n50", "elaborates"],
+    ["n17", "n27", "related_to"],
+    ["n17", "n1", "related_to"],
+    ["n98", "n17", "related_to"],
+    ["n98", "n1", "depends_on"],
+    ["n26", "n2", "related_to"],
+    ["n26", "n4", "related_to"],
+    ["n92", "n2", "related_to"],
+    ["n92", "n26", "depends_on"],
+    ["n58", "n0", "related_to"],
+    ["n86", "n121", "elaborates"],
   ];
 
   // ── palette read from CSS custom properties (theme-reactive) ───────────
@@ -558,6 +850,18 @@
   resize();
 
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // ── particle-flow config: activation spreads from the warmer endpoint ──
+  const FLOW_ON = !reduce;
+  const tierRank = (t) => t === TIER.HOT ? 2 : t === TIER.WARM ? 1 : 0;
+  for (const e of edges) {
+    const rs = tierRank(e.s.tier), rt = tierRank(e.t.tier);
+    e.rev = rt > rs;                          // draw from hotter node toward cooler
+    e.spd = 0.09 + Math.random() * 0.07;      // phase cycles per second
+    e.off = Math.random();                    // desync particles across edges
+    e.np  = e.rel === "contradicts" ? 0 : 1;  // opposition edges don't "flow"
+  }
+  let flowT = 0, lastTS = 0;
   let rotY = 0.5, rotX = -0.32, autoSpin = reduce ? 0 : 0.0016;
   let dragging = false, lastX = 0, lastY = 0, spinPaused = false;
   let hoverNode = null;
@@ -578,7 +882,7 @@
       n.sx = cx + x * persp * s;
       n.sy = cy + y * persp * s;
       n.sz = z;
-      n.sr = Math.max(2.4, (5 + n.deg * 0.9) * persp * s);
+      n.sr = Math.max(2.4, (5 + Math.min(n.deg, 16) * 0.9) * persp * s); // cap hub blobs
       n.persp = persp;
     }
   }
@@ -594,7 +898,7 @@
     if (x < 600 && y < 360) return false;      // masthead (top-left)
     if (x < 380 && y > H - 230) return false;  // legend (bottom-left)
     if (x > W - 330 && y > H - 150) return false; // meta (bottom-right)
-    if (x > W - 150 && y < 72) return false;   // theme toggle (top-right)
+    if (x > W - 280 && y < 72) return false;   // pause + theme controls (top-right)
     return true;
   }
 
@@ -631,6 +935,30 @@
       ctx.stroke();
     }
     ctx.setLineDash([]);
+
+    // ── flowing activation particles (memories lighting each other up) ──
+    if (FLOW_ON) {
+      for (const e of edges) {
+        if (!e.np) continue;
+        const active = !hoverNode || e.s === hoverNode || e.t === hoverNode;
+        if (hoverNode && !active) continue;
+        const A = e.rev ? e.t : e.s, B = e.rev ? e.s : e.t;
+        const dA = depthAlpha((e.s.sz + e.t.sz) / 2);
+        const col = PAL.rel[e.rel];
+        const p = (flowT * e.spd + e.off) % 1;
+        const px = A.sx + (B.sx - A.sx) * p;
+        const py = A.sy + (B.sy - A.sy) * p;
+        const persp = A.persp + (B.persp - A.persp) * p;
+        const fade = Math.min(1, Math.min(p, 1 - p) * 5);   // emerge / absorb at nodes
+        let a = dA * fade * (PAL.dark ? 1 : 0.85);
+        if (hoverNode && active) a = Math.min(1, a + 0.3);
+        const r = Math.max(1.1, 2.2 * persp);
+        ctx.fillStyle = rgba(col, a * 0.28);                // soft halo (no gradient — cheap)
+        ctx.beginPath(); ctx.arc(px, py, r * 2.6, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = rgba(PAL.dark ? "#ffffff" : col, a * 0.92);  // bright core
+        ctx.beginPath(); ctx.arc(px, py, r * 0.75, 0, Math.PI * 2); ctx.fill();
+      }
+    }
 
     // nodes (far first)
     const sortedNodes = nodes.slice().sort((a, b) => b.sz - a.sz);
@@ -684,8 +1012,11 @@
   }
 
   // ── animation loop ──────────────────────────────────────────────────────
-  function frame() {
+  function frame(ts) {
+    if (!lastTS) lastTS = ts;
+    const dt = Math.min(0.05, (ts - lastTS) / 1000); lastTS = ts;
     if (autoSpin && !dragging && !spinPaused) rotY += autoSpin;
+    if (FLOW_ON && !spinPaused) flowT += dt;
     draw();
     requestAnimationFrame(frame);
   }
@@ -745,7 +1076,7 @@
     else if (e.key === "ArrowDown") { rotX = Math.min(1.35, rotX + step); e.preventDefault(); }
     else if (e.key === "+" || e.key === "=") { setZoom(zoom * 1.12); e.preventDefault(); }
     else if (e.key === "-" || e.key === "_") { setZoom(zoom * 0.89); e.preventDefault(); }
-    else if (e.key === " ") { spinPaused = !spinPaused; e.preventDefault(); }
+    else if (e.key === " ") { spinPaused = !spinPaused; syncPause(); e.preventDefault(); }
   });
 
   // ── hit testing for hover ────────────────────────────────────────────────
@@ -814,8 +1145,20 @@
   });
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readPalette(); syncToggleLabel(); });
 
+  // ── pause control (mirrors the Space-key toggle; freezes orbit + flow) ──
+  const pauseBtn = document.getElementById("pause");
+  const pauseIcon = document.getElementById("pause-icon");
+  const pauseText = document.getElementById("pause-text");
+  function syncPause() {
+    pauseIcon.innerHTML = spinPaused ? "&#9654;" : "&#10074;&#10074;"; // ▶ when paused, ❚❚ when running
+    pauseText.textContent = spinPaused ? "play" : "pause";
+    pauseBtn.setAttribute("aria-pressed", String(spinPaused));
+  }
+  pauseBtn.addEventListener("click", () => { spinPaused = !spinPaused; syncPause(); });
+
   readPalette();
   syncToggleLabel();
+  syncPause();
 })();
 </script>
 </body>
