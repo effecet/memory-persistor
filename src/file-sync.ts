@@ -73,13 +73,17 @@ export function encodeProjectPath(source: string): string {
 /**
  * Slugify a memory name for use as a filename.
  * "User prefers f-strings" → "user-prefers-f-strings"
+ *
+ * 120-char cap: APFS/ext4 allow 255 bytes; 120 leaves room for the
+ * `<type>_` prefix and the `.md` suffix while lifting the ceiling that
+ * previously forced very short memory names.
  */
 function slugify(name: string): string {
   return name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 60);
+    .slice(0, 120);
 }
 
 /**
@@ -123,7 +127,32 @@ function buildMarkdown(entity: MemoryEntity): string {
 }
 
 /**
+ * Delete a file, swallowing "already gone" / unwritable errors.
+ *
+ * Every caller rebuilds MEMORY.md immediately afterwards, so a failed unlink
+ * is reconciled by the index rebuild rather than crashing the sync.
+ */
+function unlinkQuietly(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    // Intentionally empty — see docstring.
+  }
+}
+
+/**
  * Write or update a memory file and update the MEMORY.md index.
+ *
+ * Deletes any file in the dir carrying this entity's pg_id under a
+ * NON-canonical name. A rename (via `update` changing the name) re-slugs the
+ * filename; without this the old-slug file survives, leaving two files for one
+ * entity and a duplicated MEMORY.md line. `removeFile` already reconciles this
+ * way via findFilesByPgId — this closes the same gap on the write path.
+ *
+ * Order is load-bearing: write FIRST, then sweep. Sweeping first would leave
+ * the entity with zero markdown files if writeFileSync then threw, which is
+ * strictly worse than the duplicate the sweep exists to prevent. The sweep
+ * skips `filePath`, so the freshly-written file is never a candidate.
  */
 export function syncToFile(entity: MemoryEntity): void {
   const filePath = getFilePath(entity);
@@ -131,6 +160,13 @@ export function syncToFile(entity: MemoryEntity): void {
 
   mkdirSync(dir, { recursive: true });
   writeFileSync(filePath, buildMarkdown(entity), 'utf-8');
+
+  for (const stale of findFilesByPgId(dir, entity.id)) {
+    if (stale !== filePath) {
+      unlinkQuietly(stale);
+    }
+  }
+
   updateMemoryIndex(dir);
 }
 
@@ -187,11 +223,7 @@ export function removeFile(entity: MemoryEntity): void {
   }
 
   for (const target of targets) {
-    try {
-      unlinkSync(target);
-    } catch {
-      // Already gone or unwritable — fall through to index rebuild.
-    }
+    unlinkQuietly(target);
   }
 
   if (existsSync(dir)) {
@@ -227,9 +259,41 @@ export function syncMerge(source: MemoryEntity, target: MemoryEntity): void {
 }
 
 /**
+ * Read a frontmatter scalar, whether it sits at the top level or indented
+ * under a parent key such as `metadata:`.
+ *
+ * Memories written by buildMarkdown() always use the flat shape, but files
+ * produced by other tools may store `type` under `metadata:`. A
+ * top-level-only match would render those as `unknown:` in the index.
+ *
+ * When a frontmatter block is present, matching is scoped to it, so an
+ * indented `key:` inside the body (a YAML snippet in a fenced code block, say)
+ * cannot win. A leading BOM or blank lines before the opening `---` are
+ * tolerated. Files with NO frontmatter block at all fall back to scanning the
+ * first 800 characters, where that scoping guarantee does not hold — such
+ * files are malformed for this purpose anyway, and the fallback only ever
+ * feeds the index's display fields.
+ *
+ * @internal — exported for tests; not part of the MCP surface.
+ */
+export function readFrontmatterField(content: string, key: string): string {
+  const block = content.match(/^\uFEFF?\s*---\n([\s\S]*?)\n---/)?.[1] ?? content.slice(0, 800);
+  const flat = block.match(new RegExp(`^${key}:[ \\t]*(.*)$`, 'm'));
+  const nested = flat ? null : block.match(new RegExp(`^[ \\t]+${key}:[ \\t]*(.*)$`, 'm'));
+  const raw = (flat?.[1] ?? nested?.[1] ?? '').trim();
+  return raw.replace(/^["']|["']$/g, '');
+}
+
+/**
  * Rebuild the MEMORY.md index by scanning all .md files in the directory.
  * Empty or missing `description:` fields fall back to the filename so the
  * index never shows bare bullets.
+ *
+ * Line format is `- <type>: <name> — <description>`, NOT a markdown link and
+ * NOT the filename. The name is what a human recognises and what `recall`
+ * matches on; the filename is a slug nobody reads. Dropping the link cut a
+ * 209-entry index from 26.7 KB to 16.8 KB; switching filename → name is
+ * roughly byte-neutral (-1.4% measured over the same set).
  *
  * @internal — exported for tests; not part of the MCP surface.
  */
@@ -244,10 +308,15 @@ export function updateMemoryIndex(dir: string): void {
 
   for (const file of files) {
     const content = readFileSync(join(dir, file), 'utf-8');
+    // description deliberately does NOT go through readFrontmatterField: that
+    // helper strips surrounding quotes, and this line is compared byte-for-byte
+    // against indexes emitted by other tooling.
     const descMatch = content.match(/^description:[ \t]*(.*)$/m);
     const raw = descMatch?.[1]?.trim() ?? '';
     const desc = raw ? truncateDescription(raw) : file;
-    lines.push(`- [${file}](${file}) — ${desc}`);
+    const name = readFrontmatterField(content, 'name') || file.replace(/\.md$/, '');
+    const type = readFrontmatterField(content, 'type') || 'unknown';
+    lines.push(`- ${type}: ${name} — ${desc}`);
   }
 
   lines.push('');

@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_DIR } from '../src/config.js';
@@ -10,8 +18,55 @@ import {
   syncToFile,
   removeFile,
   syncMerge,
+  readFrontmatterField,
   DESCRIPTION_MAX,
 } from '../src/file-sync.js';
+
+describe('readFrontmatterField', () => {
+  const fm = (body: string) => `---\n${body}\n---\n\nbody text\n`;
+
+  it('reads a top-level scalar', () => {
+    expect(readFrontmatterField(fm('name: A thing\ntype: fact'), 'type')).toBe('fact');
+  });
+
+  it('reads a scalar nested under a parent key', () => {
+    expect(
+      readFrontmatterField(fm('name: A thing\nmetadata:\n  type: reference'), 'type'),
+    ).toBe('reference');
+  });
+
+  it('prefers a top-level match over a nested one', () => {
+    expect(
+      readFrontmatterField(fm('type: fact\nmetadata:\n  type: reference'), 'type'),
+    ).toBe('fact');
+  });
+
+  it('strips surrounding quotes', () => {
+    expect(readFrontmatterField(fm('name: "Quoted name"'), 'name')).toBe('Quoted name');
+    expect(readFrontmatterField(fm("name: 'Single'"), 'name')).toBe('Single');
+  });
+
+  it('returns an empty string for a missing key', () => {
+    expect(readFrontmatterField(fm('name: A thing'), 'type')).toBe('');
+  });
+
+  it('ignores a matching key in the body when frontmatter is present', () => {
+    // The key is absent from the frontmatter and present ONLY in the body, so
+    // an unscoped scan would return 'reference'. Scoping must yield ''.
+    const content = `---\nname: Real\n---\n\ntype: reference\n`;
+    expect(readFrontmatterField(content, 'type')).toBe('');
+  });
+
+  it('tolerates a leading BOM before the frontmatter block', () => {
+    // Same shape, prefixed with a BOM. If the `---` anchor did not tolerate
+    // the BOM the block match would fail, fall back to the unscoped
+    // first-800-chars scan, and wrongly pick up the body's `type:`.
+    const content = '﻿---\nname: Real\n---\n\ntype: reference\n';
+    expect(readFrontmatterField(content, 'type')).toBe('');
+    // And it still reads a real frontmatter value through the BOM.
+    expect(readFrontmatterField(content, 'name')).toBe('Real');
+  });
+});
 
 describe('encodeProjectPath', () => {
   it('replaces slashes with dashes', () => {
@@ -130,7 +185,7 @@ describe('updateMemoryIndex', () => {
       );
       updateMemoryIndex(dir);
       const index = readFileSync(join(dir, 'MEMORY.md'), 'utf-8');
-      const entry = index.split('\n').find(l => l.includes('sample.md'))!;
+      const entry = index.split('\n').find(l => l.startsWith('- feedback: sample'))!;
       const descPart = entry.split(' — ')[1];
       expect(descPart.length).toBeLessThanOrEqual(DESCRIPTION_MAX);
     } finally {
@@ -138,7 +193,43 @@ describe('updateMemoryIndex', () => {
     }
   });
 
-  it('falls back to filename when description is missing or empty', () => {
+  it('emits `- <type>: <name> — <desc>` and never a markdown link', () => {
+    const dir = makeTmpDir();
+    try {
+      writeFileSync(
+        join(dir, 'feedback_some-slug.md'),
+        `---\nname: Always confirm before git push\ndescription: Ask first\ntype: feedback\n---\nbody\n`,
+        'utf-8',
+      );
+      updateMemoryIndex(dir);
+      const index = readFileSync(join(dir, 'MEMORY.md'), 'utf-8');
+      expect(index).toContain('- feedback: Always confirm before git push — Ask first');
+      expect(index).not.toContain('](');
+      expect(index).not.toContain('.md —');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads `type` nested under metadata: for legacy-format files', () => {
+    const dir = makeTmpDir();
+    try {
+      writeFileSync(
+        join(dir, 'legacy.md'),
+        `---\nname: some-scoped-reference\ndescription: Scoped only\n` +
+          `metadata:\n  node_type: memory\n  type: reference\n---\nbody\n`,
+        'utf-8',
+      );
+      updateMemoryIndex(dir);
+      const index = readFileSync(join(dir, 'MEMORY.md'), 'utf-8');
+      expect(index).toContain('- reference: some-scoped-reference — Scoped only');
+      expect(index).not.toContain('unknown:');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to filename-derived values when name or type is missing', () => {
     const dir = makeTmpDir();
     try {
       writeFileSync(
@@ -147,14 +238,14 @@ describe('updateMemoryIndex', () => {
         'utf-8',
       );
       writeFileSync(
-        join(dir, 'empty.md'),
-        `---\nname: empty\ndescription: \ntype: feedback\n---\nblank desc\n`,
+        join(dir, 'bare.md'),
+        `---\ndescription: has desc\n---\nno name, no type\n`,
         'utf-8',
       );
       updateMemoryIndex(dir);
       const index = readFileSync(join(dir, 'MEMORY.md'), 'utf-8');
-      expect(index).toContain('- [missing.md](missing.md) — missing.md');
-      expect(index).toContain('- [empty.md](empty.md) — empty.md');
+      expect(index).toContain('- feedback: missing — missing.md');
+      expect(index).toContain('- unknown: bare — has desc');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -184,6 +275,36 @@ describe('removeFile pg_id glob', () => {
       '',
     ].join('\n');
   }
+
+  it('caps the filename slug at 120 chars, not 60', () => {
+    const { source, dir, projectDir } = makeIsolatedSource();
+    try {
+      // 200 words → a slug far longer than the cap before truncation.
+      const longName = Array.from({ length: 200 }, (_, i) => `w${i}`).join(' ');
+      syncToFile({
+        id: '77777777-7777-4777-8777-777777777777',
+        name: longName,
+        type: 'fact',
+        observations: 'long name body',
+        source,
+        temperature: 0.5,
+        tier: 'WARM',
+      });
+
+      const written = readdirSync(dir).filter(f => f.endsWith('.md') && f !== 'MEMORY.md');
+      expect(written).toHaveLength(1);
+
+      // Filename is `<type>_<slug>.md` — strip the prefix and suffix to get the slug.
+      const slug = written[0].replace(/^fact_/, '').replace(/\.md$/, '');
+      expect(slug).toHaveLength(120);
+      // Guards the old 60-char ceiling specifically.
+      expect(slug.length).toBeGreaterThan(60);
+      // Whole filename still fits comfortably under the 255-byte FS limit.
+      expect(written[0].length).toBeLessThan(255);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
 
   it('deletes orphan files sharing the same pg_id and spares unrelated ones', () => {
     const { source, dir, projectDir } = makeIsolatedSource();
@@ -225,6 +346,48 @@ describe('removeFile pg_id glob', () => {
       expect(existsSync(canonicalPath)).toBe(false);
       expect(existsSync(orphanPath)).toBe(false);
       expect(existsSync(bystanderPath)).toBe(true);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it('syncToFile removes stale same-pg_id files left by a rename', () => {
+    const { source, dir, projectDir } = makeIsolatedSource();
+    try {
+      const pgId = '55555555-5555-4555-8555-555555555555';
+      const otherPgId = '66666666-6666-4666-8666-666666666666';
+
+      // Pre-existing file under the OLD slug, same entity.
+      const orphanPath = join(dir, 'fact_old-name.md');
+      writeFileSync(orphanPath, frontmatter('old-name', 'fact', pgId, 'stale'), 'utf-8');
+
+      // Bystander with a different pg_id — must survive.
+      const bystanderPath = join(dir, 'fact_unrelated.md');
+      writeFileSync(bystanderPath, frontmatter('unrelated', 'fact', otherPgId, 'keep'), 'utf-8');
+
+      // Rename: same pg_id, new name → new slug.
+      syncToFile({
+        id: pgId,
+        name: 'new name',
+        type: 'fact',
+        observations: 'renamed body',
+        source,
+        temperature: 0.5,
+        tier: 'WARM',
+      });
+
+      expect(existsSync(join(dir, 'fact_new-name.md'))).toBe(true);
+      expect(existsSync(orphanPath)).toBe(false);
+      expect(existsSync(bystanderPath)).toBe(true);
+
+      // Exactly one file on disk carries this entity's pg_id.
+      const mine = readdirSync(dir).filter(
+        f =>
+          f.endsWith('.md') &&
+          f !== 'MEMORY.md' &&
+          readFileSync(join(dir, f), 'utf-8').includes(`pg_id: ${pgId}`),
+      );
+      expect(mine).toHaveLength(1);
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }
@@ -364,9 +527,10 @@ describe('syncMerge', () => {
 
       const index = readFileSync(join(dir, 'MEMORY.md'), 'utf-8');
       expect(index).not.toContain('old-source-name');
-      const bullets = index.split('\n').filter(l => l.startsWith('- ['));
+      const bullets = index.split('\n').filter(l => l.startsWith('- '));
       expect(bullets).toHaveLength(1);
-      expect(bullets[0]).toContain('project_surviving-target-name.md');
+      // Index lists `- <type>: <name>`, not the filename slug.
+      expect(bullets[0]).toContain('- project: surviving target name');
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }
@@ -391,7 +555,7 @@ describe('syncMerge', () => {
       expect(existsSync(sharedPath)).toBe(true);
       expect(readFileSync(sharedPath, 'utf-8')).toContain('merged survivor body');
       const bullets = readFileSync(join(dir, 'MEMORY.md'), 'utf-8')
-        .split('\n').filter(l => l.startsWith('- ['));
+        .split('\n').filter(l => l.startsWith('- '));
       expect(bullets).toHaveLength(1);
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
