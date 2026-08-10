@@ -8,8 +8,32 @@ import pg from 'pg';
 import { eq, sql } from 'drizzle-orm';
 import { entities, memoryRelations } from '../../src/schema.js';
 import * as schema from '../../src/schema.js';
+import * as dotenv from 'dotenv';
+import { assertSafeIntegrationTarget } from './db-guard.js';
 
 const { Pool } = pg;
+
+// Apply the SAME dotenv resolution src/db.ts uses, BEFORE the guard reads
+// DATABASE_URL. Without this the guard inspects the value loaded by the plain
+// `dotenv/config` import above, while src/db.ts later re-resolves
+// DOTENV_CONFIG_PATH with `override: true` — so a run like
+//   DATABASE_URL=<localhost> DOTENV_CONFIG_PATH=.env.supabase vitest
+// would satisfy the guard and then write to the managed database anyway.
+dotenv.config({ path: process.env.DOTENV_CONFIG_PATH, override: true });
+
+// Guard against running this suite against a shared managed database.
+// Enforced at module load, before the pool is constructed, so it protects
+// the whole suite — not just pending.test.ts / pending-crud.test.ts (whose
+// unconditional `testDb.delete(pending)` afterEach hooks are what makes this
+// dangerous). See db-guard.ts for the full rationale, including why CI is
+// exempt.
+// The opt-in is a purpose-built variable, deliberately NOT `process.env.CI`:
+// plenty of local tooling exports CI=true, and treating that as consent would
+// silently disarm the guard on a developer machine. See db-guard.ts.
+assertSafeIntegrationTarget(
+  process.env.DATABASE_URL ?? '',
+  process.env.ALLOW_NONLOCAL_INTEGRATION_DB === '1',
+);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,

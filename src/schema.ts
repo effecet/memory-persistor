@@ -1,6 +1,9 @@
 /**
  * Drizzle ORM schema for memory-persistor.
- * Two tables: entities (memories) and memory_relations (graph edges).
+ *
+ * Memory corpus: entities (memories), memory_relations (graph edges),
+ * memory_versions (history), events (observability).
+ * Separate from the corpus: pending (work queue) — see its comment below.
  */
 import {
   pgTable,
@@ -12,8 +15,11 @@ import {
   boolean,
   jsonb,
   index,
+  check,
   vector,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+import type { PendingCategory, PendingPriority, PendingStatus } from './config.js';
 
 // ── Entities (memories) ────────────────────────────────────────────────────
 
@@ -84,4 +90,36 @@ export const events = pgTable('events', {
   index('idx_events_type').on(table.eventType),
   index('idx_events_memory_id').on(table.memoryId),
   index('idx_events_created_at').on(table.createdAt),
+]);
+
+// ── Pending (work queue) ───────────────────────────────────────────────────
+//
+// Deliberately NOT part of the memory corpus. Pending items are a queue with a
+// lifecycle (open → done/archived), not thermally-decayed knowledge: no
+// temperature, no embedding, no graph edges, no markdown mirror. Kept in the
+// same database purely so the session-start hook needs one connection.
+
+export const pending = pgTable('pending', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  title: text('title').notNull(),
+  body: text('body').default(''),
+  // $type<> keeps the config.ts vocabularies on the inferred row type instead
+  // of widening every consumer to bare `string`.
+  category: text('category').$type<PendingCategory>().notNull(),
+  priority: text('priority').$type<PendingPriority>().notNull().default('medium'),
+  status: text('status').$type<PendingStatus>().notNull().default('open'),
+  source: text('source'), // cwd where the item was raised
+  originHost: text('origin_host'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  resolution: text('resolution'),
+}, (table) => [
+  index('idx_pending_status_priority').on(table.status, table.priority),
+  // Mirrors the CHECK constraints in drizzle/0009_pending.sql. Declared here
+  // too so a future `drizzle-kit generate` doesn't silently drop them — the
+  // migration is hand-written, so the schema is the only place the generator
+  // can learn they exist.
+  check('pending_category_check', sql`${table.category} IN ('skill', 'rule', 'automation', 'knowledge')`),
+  check('pending_priority_check', sql`${table.priority} IN ('low', 'medium', 'high')`),
+  check('pending_status_check', sql`${table.status} IN ('open', 'done', 'archived')`),
 ]);

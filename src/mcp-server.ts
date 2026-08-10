@@ -1,7 +1,8 @@
 /**
  * MCP Server for memory-persistor.
- * Exposes 14 tools: remember, recall, recall_by_ids, forget, update, relate, status, graph,
- * traverse, history, merge, conflicts, analytics, health.
+ * Exposes 17 tools: remember, recall, recall_by_ids, forget, update, relate, status, graph,
+ * traverse, history, merge, conflicts, analytics, health, pending_add, pending_list,
+ * pending_resolve.
  *
  * Note: env loading is handled exclusively by src/db.ts via an explicit
  * dotenv.config({ path, override: true }). Do NOT re-introduce
@@ -19,7 +20,17 @@ import { eq, sql, count, desc, asc } from 'drizzle-orm';
 import { recall, recallByIds } from './retrieve.js';
 import { bump } from './thermal.js';
 import { syncToFile, removeFile, syncMerge } from './file-sync.js';
-import { MEMORY_TYPES, STATUS_TOP_N, AUTO_RELATE_THRESHOLD, AUTO_RELATE_LIMIT } from './config.js';
+import {
+  MEMORY_TYPES,
+  STATUS_TOP_N,
+  AUTO_RELATE_THRESHOLD,
+  AUTO_RELATE_LIMIT,
+  PENDING_CATEGORIES,
+  PENDING_PRIORITIES,
+  PENDING_STATUSES,
+  PENDING_BRIEF_LIMIT,
+} from './config.js';
+import { addPending, listPending, resolvePending } from './pending.js';
 import { embedForWrite, warmEmbed, resolveEmbeddingForTextChange } from './embed.js';
 import { traverse, detectRelationType, isValidRelationType, RELATION_TYPES } from './graph.js';
 import {
@@ -767,6 +778,110 @@ server.tool(
         {
           type: 'text' as const,
           text: JSON.stringify(health, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+// ── pending_add ──────────────────────────────────────────────────────────
+
+server.tool(
+  'pending_add',
+  'Add an item to the pending work queue. Use this instead of appending to a pending.md file when deferring an improvement.',
+  {
+    title: z.string().min(1).describe('Short one-line title — this is what the session brief shows'),
+    category: z.enum(PENDING_CATEGORIES).describe('skill | rule | automation | knowledge'),
+    body: z.string().optional().describe('Full description — never injected into the session brief'),
+    priority: z.enum(PENDING_PRIORITIES).optional().describe('low | medium | high (default medium)'),
+    source: z.string().optional().describe('Project CWD where the item was raised (defaults to server cwd)'),
+  },
+  async ({ title, category, body, priority, source }) => {
+    const row = await addPending({ title, category, body, priority, source });
+
+    logEvent('pending_add', null, { pendingId: row.id, category, priority: row.priority });
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify({ id: row.id, title: row.title, priority: row.priority, status: row.status }, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+// ── pending_list ─────────────────────────────────────────────────────────
+
+server.tool(
+  'pending_list',
+  'List pending queue items, priority-ordered (high → low, newest first). Defaults to open items.',
+  {
+    status: z.enum(PENDING_STATUSES).optional().describe('open (default) | done | archived'),
+    category: z.enum(PENDING_CATEGORIES).optional().describe('Filter by category'),
+    limit: z.number().int().min(1).max(100).optional().describe(`Max items (default ${PENDING_BRIEF_LIMIT})`),
+    titlesOnly: z
+      .boolean()
+      .optional()
+      .describe(
+        'Omit bodies — cheap triage projection. When true, every returned item has body set to the ' +
+          'empty string regardless of its actual content — this does NOT mean the body is empty, only ' +
+          'that it was stripped. Call again without titlesOnly to fetch the full body.',
+      ),
+  },
+  async ({ status, category, limit, titlesOnly }) => {
+    const { items, total } = await listPending({ status, category, limit, titlesOnly });
+
+    // Deliberately no logEvent() call here — pending_list is a read-only
+    // observability call. Logging it would write an events row on every
+    // session start, keeping the event-freshness signal permanently fresh
+    // and silently defeating the write-pipeline check in
+    // scripts/events_canary.py.
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify({ total, returned: items.length, items }, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+// ── pending_resolve ──────────────────────────────────────────────────────
+
+server.tool(
+  'pending_resolve',
+  'Close a pending item, stamping resolved_at and an optional resolution note. ' +
+    'Never deletes — status flips back with an UPDATE.',
+  {
+    id: z.string().uuid().describe('Pending item id'),
+    resolution: z.string().optional().describe('What resolved it (commit, PR, decision)'),
+    status: z
+      .enum(['done', 'archived'])
+      .optional()
+      .describe(
+        'done (default) = finished. archived = dropped without being done ' +
+          '(obsolete, superseded, no longer wanted).',
+      ),
+  },
+  async ({ id, resolution, status }) => {
+    const row = await resolvePending(id, resolution, status);
+
+    if (!row) {
+      throw new Error(
+        `No open pending item with id ${id} — it does not exist, or it was already closed.`,
+      );
+    }
+
+    logEvent('pending_resolve', null, { pendingId: row.id });
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify({ id: row.id, title: row.title, status: row.status, resolvedAt: row.resolvedAt }, null, 2),
         },
       ],
     };

@@ -110,3 +110,20 @@ export const STALE_THRESHOLD_DAYS = 30;
 // ── Memory types ───────────────────────────────────────────────────────────
 export const MEMORY_TYPES = ['user', 'project', 'decision', 'fact', 'pattern', 'feedback', 'reference'] as const;
 export type MemoryType = typeof MEMORY_TYPES[number];
+
+// ── Pending queue ──────────────────────────────────────────────────────────
+
+/** Allowed `pending.category` values. */
+export const PENDING_CATEGORIES = ['skill', 'rule', 'automation', 'knowledge'] as const;
+export type PendingCategory = typeof PENDING_CATEGORIES[number];
+
+/** Allowed `pending.priority` values, lowest urgency first. */
+export const PENDING_PRIORITIES = ['low', 'medium', 'high'] as const;
+export type PendingPriority = typeof PENDING_PRIORITIES[number];
+
+/** Allowed `pending.status` values. */
+export const PENDING_STATUSES = ['open', 'done', 'archived'] as const;
+export type PendingStatus = typeof PENDING_STATUSES[number];
+
+/** Max open items rendered in the session-start brief (titles only). */
+export const PENDING_BRIEF_LIMIT = 10;

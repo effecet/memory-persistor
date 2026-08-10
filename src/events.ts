@@ -19,7 +19,9 @@ export type EventType =
   | 'traverse'
   | 'history'
   | 'conflicts'
-  | 'recall_by_ids';
+  | 'recall_by_ids'
+  | 'pending_add'
+  | 'pending_resolve';
 
 /**
  * Log an event. Fire-and-forget — never throws, never blocks tool execution.
