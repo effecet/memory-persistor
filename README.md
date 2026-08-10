@@ -57,6 +57,7 @@ The server exposes these tools to an MCP client:
 |------|---------|
 | `remember` | Store a memory with tags, type, importance — auto-relates to top-3 FTS matches, dedup-checks |
 | `recall` | 9-signal hybrid search (FTS + trigram + **semantic vector** + temperature + importance + graph centrality + recency + access frequency) |
+| `recall_by_ids` | Fetch full bodies for specific ids (no search) — drill-down after a capped recall |
 | `forget` | Delete a memory, cascade its relations, remove the synced markdown file |
 | `update` | Partial update with automatic version snapshot before changes |
 | `relate` | Create typed edges: `related_to`, `supersedes`, `contradicts`, `elaborates`, `depends_on` |
@@ -68,12 +69,18 @@ The server exposes these tools to an MCP client:
 | `conflicts` | List all `contradicts` edge pairs |
 | `analytics` | Recall hit rate, top accessed, temperature distribution, events/day, graph density |
 | `health` | Orphan count, stale count, **cosine near-duplicate pairs** (similarity scores + proposed canonical), contradictions, type coverage |
+| `pending_add` | Add an item to the pending work queue (title, category, priority, body) |
+| `pending_list` | List queue items, priority-ordered; `status` / `category` / `limit` / `titlesOnly` filters |
+| `pending_resolve` | Close an item as `done` or `archived`, with an optional resolution note |
 
 ### Memory Types
 
 `user` · `project` · `decision` · `fact` · `pattern` · `feedback` · `reference`
 
 ## Architecture
+
+For the runtime data-flow and a full schema ER diagram, see
+[docs/architecture.md](docs/architecture.md).
 
 ```mermaid
 graph TD
@@ -88,8 +95,13 @@ graph TD
         EMB --> OBS
     end
 
+    subgraph Queue["Work queue — not memory"]
+        PEND[pending.ts<br/>add, list, resolve]
+    end
+
     subgraph DB["PostgreSQL 17 + pg_trgm + pgvector + pg_cron"]
         PG[(Entities + embedding<br/>+ Relations + Versions + Events)]
+        PQ[(Pending)]
         CRON[pg_cron<br/>Nightly decay]
     end
 
@@ -103,9 +115,12 @@ graph TD
     INT --> PG
     OBS --> PG
     SERVER --> FS
+    SERVER --> PEND
+    PEND --> PQ
     CAN -.->|polls events<br/>alert on silence| PG
 
     style Core fill:#1e293b,stroke:#f97316,color:#fff
+    style Queue fill:#1e293b,stroke:#facc15,color:#fff
     style DB fill:#1e293b,stroke:#22d3ee,color:#fff
     style Sync fill:#1e293b,stroke:#a78bfa,color:#fff
 ```
@@ -160,10 +175,37 @@ Memories have a **temperature** (0.0–1.0) that decays daily with a 0.85 multip
 - **Tier classification** — HOT (>0.7), WARM (0.3–0.7), COLD (<0.3)
 - **Stale flagging** — COLD memories untouched for 30+ days are marked stale
 
+### Pending Work Queue
+
+`pending_add` / `pending_list` / `pending_resolve` back a small work queue for
+deferred improvements — the things an agent notices mid-task but shouldn't stop to
+do. A session-start hook can read the open items and surface them as a brief.
+
+It lives in the same database but is **deliberately not part of the memory corpus**:
+no temperature, no embedding, no graph edges, no markdown mirror. Memories decay;
+queue items have a lifecycle (`open → done / archived`) and are either finished or
+not. Sharing the database only means a session-start hook needs one connection.
+
+| Field | Values |
+|-------|--------|
+| `category` | `skill` · `rule` · `automation` · `knowledge` |
+| `priority` | `low` · `medium` · `high` (ordered high → low, newest first) |
+| `status` | `open` · `done` · `archived` |
+
+`pending_list` takes `titlesOnly` for cheap triage — it blanks bodies rather than
+omitting items, so a title-only listing never implies an empty body. Nothing is
+ever deleted: `pending_resolve` flips `status` and stamps `resolved_at`, which is
+reversible.
+
+> **Note on RLS** — `drizzle/0009_pending.sql` creates `pending` with **no** row-level
+> security policy, unlike the four memory tables which grant `anon` read access.
+> That divergence is intentional (`anon` is default-denied on a private work queue),
+> and the migration documents it so it doesn't get "fixed" for consistency.
+
 ### Persistence
 
-1. **PostgreSQL** — primary store (entities, relations, versions, events)
-2. **Markdown files** *(optional)* — `file-sync.ts` mirrors memories to a directory of `.md` files (set `MEMORY_PERSISTOR_DIR` / `CLAUDE_DIR`), handy for agents with a file-based memory convention.
+1. **PostgreSQL** — primary store (entities, relations, versions, events, pending)
+2. **Markdown files** *(optional)* — `file-sync.ts` mirrors memories to a directory of `.md` files (set `MEMORY_PERSISTOR_DIR` / `CLAUDE_DIR`), handy for agents with a file-based memory convention. The index it maintains lists one line per memory as `- <type>: <name> — <description>`.
 
 ### pg_cron Jobs
 
@@ -204,7 +246,8 @@ src/
   observability.ts    # Analytics, health metrics, cosine dedup pairs
   events.ts           # Fire-and-forget event logging
   file-sync.ts        # Optional dual-write to markdown files
-  schema.ts           # Drizzle ORM schema (entities, relations, versions, events)
+  pending.ts          # Work queue: add, list, resolve (not part of the memory corpus)
+  schema.ts           # Drizzle ORM schema (entities, relations, versions, events, pending)
   config.ts           # Scoring weights, decay rates, tier boundaries, embed pins
   db.ts               # Database connection (auto-SSL for remote)
   import.ts           # Seed script for existing markdown memories
@@ -217,6 +260,9 @@ tests/
   *.test.ts           # Unit tests (Vitest)
   *.py                # Python tests (pytest)
   integration/        # Integration suites against real Postgres
+  integration/db-guard.ts  # Refuses to run the suite against a shared database
+docs/
+  architecture.md     # Data-flow + schema ER diagrams
 drizzle/              # Migration files
 initdb/
   01-pg-cron.sql      # pg_cron setup, decay job, startup catchup function
