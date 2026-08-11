@@ -19,18 +19,55 @@ CREATE TABLE IF NOT EXISTS public.pending (
     origin_host text,
     created_at  timestamptz DEFAULT NOW(),
     resolved_at timestamptz,
-    resolution  text,
-
-    -- The MCP tools validate these with zod, but the session-start hook reads
-    -- this table directly and the migration is applied by hand — so the
-    -- vocabularies are enforced here too. Without them an out-of-vocabulary
-    -- priority silently sorts into the ELSE bucket instead of erroring.
-    CONSTRAINT pending_category_check CHECK (category IN ('skill', 'rule', 'automation', 'knowledge')),
-    CONSTRAINT pending_priority_check CHECK (priority IN ('low', 'medium', 'high')),
-    CONSTRAINT pending_status_check   CHECK (status   IN ('open', 'done', 'archived'))
+    resolution  text
+    -- CHECK constraints on category/priority/status are added by the DO block
+    -- below, not inline here. See the comment there for why.
 );
 
 CREATE INDEX IF NOT EXISTS idx_pending_status_priority ON public.pending(status, priority);
+
+-- ── Vocabulary CHECK constraints ───────────────────────────────────────────
+--
+-- The MCP tools validate these with zod, but the session-start hook reads this
+-- table directly and the migration is applied by hand — so the vocabularies are
+-- enforced here too. Without them an out-of-vocabulary priority silently sorts
+-- into the ELSE bucket instead of erroring.
+--
+-- Added here rather than inline in CREATE TABLE above, so each vocabulary is
+-- written exactly once AND so existing installs actually receive them. Inline
+-- constraints only fire on a FRESH install: `CREATE TABLE IF NOT EXISTS` is a
+-- no-op wherever `pending` already exists, so anyone who applied an earlier
+-- revision of this file would never get the CHECKs. Writing them in both places
+-- instead would leave two copies of each vocabulary to drift apart.
+--
+-- Postgres has no `ADD CONSTRAINT IF NOT EXISTS`, hence the catalog probe.
+-- `conname` is unique per-table, not per-schema, so the probe is scoped by
+-- `conrelid` — an unscoped name match would skip the ALTER whenever any other
+-- table happened to carry a constraint of the same name.
+--
+-- Adding a CHECK validates existing rows, so this fails loudly if any row is
+-- already out of vocabulary — which is the point.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'public.pending'::regclass
+                     AND conname = 'pending_category_check') THEN
+        ALTER TABLE public.pending ADD CONSTRAINT pending_category_check
+            CHECK (category IN ('skill', 'rule', 'automation', 'knowledge'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'public.pending'::regclass
+                     AND conname = 'pending_priority_check') THEN
+        ALTER TABLE public.pending ADD CONSTRAINT pending_priority_check
+            CHECK (priority IN ('low', 'medium', 'high'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'public.pending'::regclass
+                     AND conname = 'pending_status_check') THEN
+        ALTER TABLE public.pending ADD CONSTRAINT pending_status_check
+            CHECK (status IN ('open', 'done', 'archived'));
+    END IF;
+END $$;
 
 -- ── Row-level security: enabled, deliberately NO policy ────────────────────
 --

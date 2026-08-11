@@ -3,6 +3,8 @@
  * integration suite from ever running its unconditional `DELETE FROM pending`
  * against a shared managed database.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import {
   isLocalDatabaseUrl,
@@ -168,5 +170,46 @@ describe('assertSafeIntegrationTarget', () => {
         assertSafeIntegrationTarget('postgresql://postgres:localdev@localhost:5432/memory_persistor', false),
       ).not.toThrow();
     });
+  });
+});
+
+/**
+ * Source-drift guard.
+ *
+ * The guard function above is only as good as the DATABASE_URL it is handed.
+ * helpers.ts must resolve that value the same way src/db.ts does, or the assert
+ * validates one target while the code under test connects to another: a plain
+ * `import 'dotenv/config'` reads ./.env and does not override an already-set
+ * DATABASE_URL, whereas src/db.ts re-resolves DOTENV_CONFIG_PATH with
+ * `override: true`. Two resolutions means two pools with two targets, and the
+ * guard only ever sees the first — so the suite can pass the check and still
+ * write to a managed database.
+ *
+ * Behavioural coverage would need a module-registry reset per case, so the
+ * contract is pinned at the source level instead.
+ */
+describe('helpers.ts resolves DATABASE_URL the same way src/db.ts does', () => {
+  const read = (rel: string) =>
+    readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+
+  it('helpers.ts overrides from DOTENV_CONFIG_PATH, like db.ts', () => {
+    expect(read('./integration/helpers.ts')).toMatch(
+      /dotenv\.config\(\{\s*path:\s*process\.env\.DOTENV_CONFIG_PATH,\s*override:\s*true\s*\}\)/,
+    );
+  });
+
+  it("helpers.ts does not also use bare 'dotenv/config', which cannot override", () => {
+    // Anchored to a real import statement at line start: the file's own
+    // comments name the retired form, and a loose substring match would flag
+    // the explanation instead of the code.
+    expect(read('./integration/helpers.ts')).not.toMatch(/^\s*import\s+['"]dotenv\/config['"]/m);
+  });
+
+  it('db.ts still uses the override form this guard is mirroring', () => {
+    // If db.ts ever changes its resolution, this pairing is stale and the two
+    // pools can diverge again — fail here rather than against a live database.
+    expect(read('../src/db.ts')).toMatch(
+      /dotenv\.config\(\{\s*path:\s*process\.env\.DOTENV_CONFIG_PATH,\s*override:\s*true\s*\}\)/,
+    );
   });
 });
