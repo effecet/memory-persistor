@@ -2,7 +2,6 @@
  * Shared helpers for integration tests.
  * Tests run against the real Docker Postgres instance.
  */
-import 'dotenv/config';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import { eq, sql } from 'drizzle-orm';
@@ -14,11 +13,15 @@ import { assertSafeIntegrationTarget } from './db-guard.js';
 const { Pool } = pg;
 
 // Apply the SAME dotenv resolution src/db.ts uses, BEFORE the guard reads
-// DATABASE_URL. Without this the guard inspects the value loaded by the plain
-// `dotenv/config` import above, while src/db.ts later re-resolves
-// DOTENV_CONFIG_PATH with `override: true` — so a run like
-//   DATABASE_URL=<localhost> DOTENV_CONFIG_PATH=.env.supabase vitest
+// DATABASE_URL — and it must be the ONLY resolution here. A plain
+// `import 'dotenv/config'` reads ./.env and does NOT override an already-set
+// DATABASE_URL, while src/db.ts re-resolves DOTENV_CONFIG_PATH with
+// `override: true`. Having both gives the suite two pools with two targets:
+// `testDb` below, and the pool behind the functions under test in src/. The
+// guard would only ever see the first, so a run like
+//   DATABASE_URL=<localhost> DOTENV_CONFIG_PATH=<managed> vitest
 // would satisfy the guard and then write to the managed database anyway.
+// tests/db-guard.test.ts pins this pairing at the source level.
 dotenv.config({ path: process.env.DOTENV_CONFIG_PATH, override: true });
 
 // Guard against running this suite against a shared managed database.
