@@ -19,16 +19,16 @@
   "license": "MIT",
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "pg": "^8.22.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/pg": "^8.20.0",
+    "@types/pg": "^8.20.4",
     "drizzle-kit": "^0.31.10",
-    "tsx": "^4.23.1",
+    "tsx": "^4.23.9",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
