@@ -56,8 +56,8 @@ The server exposes these tools to an MCP client:
 | Tool | Purpose |
 |------|---------|
 | `remember` | Store a memory with tags, type, importance — auto-relates to top-3 FTS matches, dedup-checks |
-| `recall` | 9-signal hybrid search (FTS + trigram + **semantic vector** + temperature + importance + graph centrality + recency + access frequency) |
-| `recall_by_ids` | Fetch full bodies for specific ids (no search) — drill-down after a capped recall |
+| `recall` | 9-signal hybrid search (FTS + trigram + **semantic vector** + temperature + importance + graph centrality + recency + access frequency). `output_mode: "summary"` returns lean triage rows — no observations body, and at most 5 `related` edges with `related_total` when truncated |
+| `recall_by_ids` | Fetch full bodies for specific ids (no search) — drill-down after a capped or summary recall |
 | `forget` | Delete a memory, cascade its relations, remove the synced markdown file |
 | `update` | Partial update with automatic version snapshot before changes |
 | `relate` | Create typed edges: `related_to`, `supersedes`, `contradicts`, `elaborates`, `depends_on` |
@@ -207,12 +207,59 @@ reversible.
 1. **PostgreSQL** — primary store (entities, relations, versions, events, pending)
 2. **Markdown files** *(optional)* — `file-sync.ts` mirrors memories to a directory of `.md` files (set `MEMORY_PERSISTOR_DIR` / `CLAUDE_DIR`), handy for agents with a file-based memory convention. The index it maintains lists one line per memory as `- <type>: <name> — <description>`.
 
+#### Index budget
+
+An auto-loaded index file is only useful if an agent can afford to read it, so
+the index is bounded at **170 lines**. Under budget, every memory is listed.
+Over it, entries are ranked and the overflow is replaced by a
+`- …and N more — use \`recall\`` footer — the dropped memories are still fully
+searchable, just not pre-loaded.
+
+Retention order when the budget bites:
+
+1. `user` and `feedback` entries first — standing instructions and identity
+2. then tier: `HOT` > `WARM` > `COLD` (an unknown tier sorts as `WARM`, never dropped blind)
+3. then temperature, descending
+4. then filename, in **codepoint** order (not `localeCompare`, which disagrees with the display sort)
+
+Step 1 is a priority tier, not an exemption: if protected entries alone exceeded
+the budget they would still be cut among themselves, so the file cannot breach.
+
+Temperature and tier come from **Postgres at emit time**, keyed by each file's
+`pg_id` — one batched lookup per rebuild, never one per file. Frontmatter is only
+rewritten when that memory is written, so ranking on it would go stale between
+decays and degrade to roughly alphabetical. Two contract details follow from
+that: if the database is unreachable the **whole** index falls back to
+frontmatter ranking (never a mix of fresh and stale values), while a `pg_id` that
+the database does not know is an **orphan** and ranks at temperature 0, so it can
+never outrank a live memory.
+
 ### pg_cron Jobs
 
 | Job | Schedule | Purpose |
 |-----|----------|---------|
 | `memory-thermal-decay` | `0 6 * * *` UTC | Nightly pattern-aware decay + importance drift + stale flagging |
 | `memory-decay-startup-catchup` | `@reboot` (local Docker) | Runs `decay_catchup()` on container start if last decay was >24h ago |
+
+The decay contract is version-controlled in
+`drizzle/0010_thermal_decay_function.sql`, which creates
+`public.memory_thermal_decay()` and schedules it. Keeping it in a migration
+rather than only as a live `cron.job` row is what makes it reviewable and
+reproducible — `make cron-verify` asserts the live job still matches the
+committed migration, and `tests/test_thermal_decay_migration.py` fails if a
+constant in `src/config.ts` moves without the SQL.
+
+`decayAll()` in `src/thermal.ts` calls that same function and then does the
+markdown half, which SQL structurally cannot: Postgres has no access to any
+machine's filesystem, which is exactly why the scheduled path alone leaves
+frontmatter stale. Run `make decay-remote` on a machine that has the memory
+directory to reconcile it.
+
+The function is **plpgsql, not a single statement**, deliberately: the decay pass
+and the stale-flag pass must be separate statements, or the stale pass would
+share a snapshot and not see the tiers the decay pass just wrote. Its
+`cron.schedule` call is guarded on the `cron` schema existing, so the migration
+still applies to ephemeral test databases that have no pg_cron.
 
 ## Development
 
@@ -225,13 +272,14 @@ make decay             # run thermal decay (local)
 make backfill-embeddings  # embed any rows with a NULL embedding (ARGS=--dry-run to count)
 make canary            # events-pipeline freshness check (local)
 make cron-status       # pg_cron schedule and recent runs
+make cron-verify       # assert the live decay job matches the committed migration
 make graph             # Mermaid graph of memory network
 make seed              # import existing markdown memories (optional file-sync)
 make clean             # remove volumes and generated files
 ```
 
 Each command has a `-remote` variant (`dev-remote`, `status-remote`, `decay-remote`,
-`canary-remote`) that targets the connection in `.env.supabase`.
+`canary-remote`, `cron-status-remote`) that targets the connection in `.env.supabase`.
 
 ### Project Structure
 
@@ -256,6 +304,7 @@ scripts/
   events_canary.py           # Event-freshness check (exits 1 if pipeline silent)
   backfill-edges.ts          # One-time auto-relate backfill
   backfill-embeddings.ts     # One-time embedding backfill for NULL rows
+  decay-remote.ts            # Manual decay pass (SQL half + the markdown half)
 tests/
   *.test.ts           # Unit tests (Vitest)
   *.py                # Python tests (pytest)

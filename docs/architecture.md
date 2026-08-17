@@ -20,6 +20,15 @@ flowchart TD
         E --> V[384-d L2-normalized vector]
         V --> PG[(entities.embedding<br/>pgvector)]
         R --> FS[file-sync.ts<br/>markdown dual-write]
+        FS --> IDX[updateMemoryIndex<br/>170-line budget]
+        PG -.->|batched pg_id &rarr; tier, temp| IDX
+    end
+
+    subgraph decay["Nightly decay"]
+        CRON[pg_cron: memory-thermal-decay] --> FN[["public.memory_thermal_decay()<br/>drizzle/0010"]]
+        FN --> PG
+        DA[decayAll / make decay-remote] --> FN
+        DA --> FS
     end
 
     subgraph read["Read path (recall)"]
@@ -51,6 +60,18 @@ flowchart TD
   still rank.
 - **Dedup** — `health` surfaces cosine near-duplicate pairs above `0.92` for
   human-approved `merge`. Nothing is ever auto-merged.
+- **Index** — every markdown write rebuilds the directory's index under a 170-line
+  budget, ranking retention on **live Postgres** tier/temperature via one batched
+  `pg_id` lookup per rebuild. `user` and `feedback` entries are retained first, then
+  HOT > WARM > COLD, then temperature, then filename in codepoint order. If the
+  database is unreachable the whole index falls back to frontmatter ranking — never a
+  mix — and a `pg_id` with no row ranks at temperature 0 so orphans cannot outrank
+  live memories.
+- **Decay** — the nightly `pg_cron` job and a manual `make decay-remote` call the same
+  version-controlled `public.memory_thermal_decay()`. Postgres cannot reach any
+  machine's filesystem, so the scheduled path updates rows only; `decayAll()` adds the
+  markdown half and rebuilds each affected directory's index **once**, on the last
+  write into it.
 - **Queue** — `pending_*` writes and reads the `pending` table and touches nothing else.
   Note that `pending_list` deliberately logs **no** event: it is a read-only call that
   typically fires on every session start, and logging it would keep the event stream
