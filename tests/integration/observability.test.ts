@@ -7,19 +7,37 @@ import {
   testDb,
   insertTestMemory,
   insertTestRelation,
+  basisEmbedding,
   cleanupMemories,
   closeTestDb,
   findPair,
 } from './helpers.js';
 import { logEvent } from '../../src/events.js';
 import { getAnalytics, getHealth } from '../../src/observability.js';
+import { DEDUP_COSINE_THRESHOLD } from '../../src/config.js';
 import { events } from '../../src/schema.js';
 import { eq, sql } from 'drizzle-orm';
 
 const createdIds: string[] = [];
 
-/** Wait for fire-and-forget event inserts to settle. */
-const settle = () => new Promise((r) => setTimeout(r, 50));
+/**
+ * Poll until `check` resolves true. Fire-and-forget event inserts land
+ * asynchronously, so a fixed sleep is racy — a 50ms sleep flaked on CI when
+ * the insert to the Postgres service took longer than the guess. Polls every
+ * 50ms up to `timeoutMs`, then returns so the assertion reports the real state
+ * (fast on success: returns as soon as the row lands, often <50ms).
+ */
+async function waitFor(
+  check: () => Promise<boolean>,
+  timeoutMs = 3000,
+): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    if (await check()) return;
+    if (Date.now() - start > timeoutMs) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
 
 afterEach(async () => {
   // Clean up test events
@@ -42,15 +60,17 @@ describe('logEvent', () => {
     createdIds.push(mem.id);
 
     logEvent('remember', mem.id, { test: 'true', detail: 'created' });
-    await settle();
 
-    const result = await testDb.execute(sql`
-      SELECT event_type, memory_id, payload
-      FROM public.events
-      WHERE memory_id = ${mem.id}
-      AND payload->>'test' = 'true'
-    `);
+    const query = () =>
+      testDb.execute(sql`
+        SELECT event_type, memory_id, payload
+        FROM public.events
+        WHERE memory_id = ${mem.id}
+        AND payload->>'test' = 'true'
+      `);
+    await waitFor(async () => (await query()).rows.length >= 1);
 
+    const result = await query();
     expect(result.rows.length).toBeGreaterThanOrEqual(1);
     const row = result.rows[0] as any;
     expect(row.event_type).toBe('remember');
@@ -60,16 +80,18 @@ describe('logEvent', () => {
 
   it('logs events without a memoryId (null)', async () => {
     logEvent('recall', null, { test: 'true', query: 'test query' });
-    await settle();
 
-    const result = await testDb.execute(sql`
-      SELECT event_type, memory_id, payload
-      FROM public.events
-      WHERE event_type = 'recall'
-      AND payload->>'test' = 'true'
-      AND payload->>'query' = 'test query'
-    `);
+    const query = () =>
+      testDb.execute(sql`
+        SELECT event_type, memory_id, payload
+        FROM public.events
+        WHERE event_type = 'recall'
+        AND payload->>'test' = 'true'
+        AND payload->>'query' = 'test query'
+      `);
+    await waitFor(async () => (await query()).rows.length >= 1);
 
+    const result = await query();
     expect(result.rows.length).toBeGreaterThanOrEqual(1);
     const row = result.rows[0] as any;
     expect(row.memory_id).toBeNull();
@@ -107,7 +129,7 @@ describe('getAnalytics', () => {
     logEvent('recall', null, { test: 'true', resultCount: 3, avgScore: 0.75 });
     logEvent('recall', null, { test: 'true', resultCount: 0, avgScore: 0 });
     logEvent('recall', null, { test: 'true', resultCount: 5, avgScore: 0.82 });
-    await settle();
+    await waitFor(async () => (await getAnalytics()).totalRecalls >= 3);
 
     const analytics = await getAnalytics();
     // At least our 3 test events should be counted
@@ -212,6 +234,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'unique-task1-memory-abc',
       type: 'fact',
       observations: 'completely unique content xyz-task1',
+      embedding: basisEmbedding(10), // embedded but no near-dupe → no pair
     });
     createdIds.push(mem.id);
 
@@ -233,6 +256,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'postgres-pooler-connection-limit-notes',
       type: 'fact',
       observations: longObs,
+      embedding: basisEmbedding(11),
     });
     createdIds.push(memA.id);
 
@@ -240,6 +264,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'postgres-pooler-connection-limit-notes',
       type: 'fact',
       observations: shortObs,
+      embedding: basisEmbedding(11),
     });
     createdIds.push(memB.id);
 
@@ -253,7 +278,7 @@ describe('getHealth — dedupCandidates field', () => {
     expect(typeof pair!.aObservationsLength).toBe('number');
     expect(typeof pair!.bObservationsLength).toBe('number');
     expect(typeof pair!.similarity).toBe('number');
-    expect(pair!.similarity).toBeGreaterThan(0.85);
+    expect(pair!.similarity).toBeGreaterThan(DEDUP_COSINE_THRESHOLD);
     expect([pair!.aId, pair!.bId]).toContain(pair!.proposedCanonicalId);
   });
 
@@ -263,16 +288,18 @@ describe('getHealth — dedupCandidates field', () => {
       type: 'fact',
       observations:
         'The canonical length picker prefers longer observations because more text usually carries more context and more context is more useful.',
+      embedding: basisEmbedding(12),
     });
     createdIds.push(memA.id);
 
     const memB = await insertTestMemory({
       name: 'canonical-length-test-a',
       type: 'fact',
-      // Identical name to memA — guarantees the pair surfaces (similarity is
-      // name-only). Shorter observations exercise the length tie-break.
+      // Same basis embedding as memA → cosine 1.0 guarantees the pair surfaces.
+      // Shorter observations exercise the length tie-break for proposedCanonical.
       observations:
         'The canonical length picker prefers longer observations because more text',
+      embedding: basisEmbedding(12),
     });
     createdIds.push(memB.id);
 
@@ -289,6 +316,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'canonical-tiebreak-test',
       type: 'fact',
       observations: sameLengthObs,
+      embedding: basisEmbedding(13),
     });
     createdIds.push(memOlder.id);
 
@@ -299,6 +327,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'canonical-tiebreak-test',
       type: 'fact',
       observations: sameLengthObs,
+      embedding: basisEmbedding(13),
     });
     createdIds.push(memNewer.id);
 
@@ -313,6 +342,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'canonical-fallback-test',
       type: 'fact',
       observations: 'Identical observation text for fallback determinism check.',
+      embedding: basisEmbedding(14),
     });
     createdIds.push(memA.id);
 
@@ -320,6 +350,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'canonical-fallback-test',
       type: 'fact',
       observations: 'Identical observation text for fallback determinism check.',
+      embedding: basisEmbedding(14),
     });
     createdIds.push(memB.id);
 
@@ -339,6 +370,7 @@ describe('getHealth — dedupCandidates field', () => {
         name: `cap-test-memory-${runId}-${i}`,
         type: 'fact',
         observations: baseObs,
+        embedding: basisEmbedding(15), // all identical → C(15,2)=105 cosine pairs
       });
       createdIds.push(mem.id);
       seededIds.add(mem.id);
@@ -365,6 +397,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'cross-type-guard-test',
       type: 'fact',
       observations: sharedObs,
+      embedding: basisEmbedding(16),
     });
     createdIds.push(memA.id);
 
@@ -372,6 +405,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'cross-type-guard-test',
       type: 'feedback', // different type
       observations: sharedObs,
+      embedding: basisEmbedding(16), // identical vector → excluded only by the type predicate
     });
     createdIds.push(memB.id);
 
@@ -380,11 +414,13 @@ describe('getHealth — dedupCandidates field', () => {
     expect(crossTypePair).toBeUndefined();
   });
 
-  it('excludes pairs below the 0.85 similarity threshold', async () => {
+  it('excludes pairs below DEDUP_COSINE_THRESHOLD', async () => {
+    // Orthogonal basis embeddings → cosine 0, far below the 0.92 gate.
     const memA = await insertTestMemory({
       name: 'threshold-low-test-apples',
       type: 'fact',
       observations: 'Apples are red fruits that grow on trees in temperate climates.',
+      embedding: basisEmbedding(17),
     });
     createdIds.push(memA.id);
 
@@ -392,6 +428,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'threshold-low-test-rockets',
       type: 'fact',
       observations: 'Rockets are space vehicles that carry payloads into orbit.',
+      embedding: basisEmbedding(18),
     });
     createdIds.push(memB.id);
 
@@ -400,38 +437,17 @@ describe('getHealth — dedupCandidates field', () => {
     expect(lowSimPair).toBeUndefined();
   });
 
-  it('excludes pairs with identical observations but dissimilar names (name-only similarity)', async () => {
-    // Pins the deliberate name-only narrowing: before this change, identical
-    // observation bodies could push concatenated similarity over 0.85 even
-    // with unrelated names. Now similarity is name-only, so this pair must
-    // NOT surface despite byte-identical observations.
-    const sharedObs =
-      'This observation text is byte-identical across both memories on purpose to prove body text no longer contributes to dedup similarity.';
-
-    const memA = await insertTestMemory({
-      name: 'quantum-entanglement-notes',
-      type: 'fact',
-      observations: sharedObs,
-    });
-    createdIds.push(memA.id);
-
-    const memB = await insertTestMemory({
-      name: 'sourdough-starter-schedule',
-      type: 'fact',
-      observations: sharedObs,
-    });
-    createdIds.push(memB.id);
-
-    const health = await getHealth();
-    const pair = findPair(health.dedupCandidates, memA.id, memB.id);
-    expect(pair).toBeUndefined();
-  });
+  // (Removed the old name-only test that asserted identical bodies with
+  // different names do NOT surface — that was the pre-Phase-4 trigram behavior.
+  // Under cosine, a diff-name/same-body near-dupe SHOULD surface; that upgrade
+  // is proven end-to-end with real embeddings in dedup-cosine.test.ts.)
 
   it('proposedCanonicalId tiebreaks by created_at when both observations are null', async () => {
     const memA = await insertTestMemory({
       name: 'null-obs-tiebreak-test',
       type: 'fact',
       observations: null,
+      embedding: basisEmbedding(19),
     });
     createdIds.push(memA.id);
 
@@ -441,6 +457,7 @@ describe('getHealth — dedupCandidates field', () => {
       name: 'null-obs-tiebreak-test',
       type: 'fact',
       observations: null,
+      embedding: basisEmbedding(19),
     });
     createdIds.push(memB.id);
 
