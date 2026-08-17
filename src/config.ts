@@ -100,6 +100,21 @@ export const STATUS_TOP_N = 5;
  */
 export const RESPONSE_CAP_BYTES = 30_000;
 
+/**
+ * Max neighbours a summary-mode row carries in `related[]`.
+ *
+ * Summary exists to triage under the caller's token budget, but it used to copy
+ * the whole edge list — and edge counts are heavily skewed: a corpus averaging
+ * ~4 edges per entity can still have hubs carrying 200+. Hubs also score well,
+ * so those rows surface most, which made the "lean" projection cost nearly as
+ * much as full mode on exactly the rows it was supposed to shrink. A cap of 5
+ * sits above the average, so the vast majority of rows are untouched while the
+ * worst are cut by ~97%. When it truncates, the row carries `related_total` so
+ * the true count is not lost and the caller can reach for `traverse`.
+ * `full` mode is deliberately uncapped — RESPONSE_CAP_BYTES above governs it.
+ */
+export const SUMMARY_RELATED_CAP = 5;
+
 // ── Auto-relate ──────────────────────────────────────────────────────────
 export const AUTO_RELATE_THRESHOLD = 0.3;
 export const AUTO_RELATE_LIMIT = 3;

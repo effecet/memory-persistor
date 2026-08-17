@@ -198,14 +198,14 @@ server.tool(
 
 server.tool(
   'recall',
-  'Search memories using full-text search, tag matching, and thermal scoring. Returns the most relevant memories. Pass output_mode="summary" for a lean projection (no observations body) to triage under the harness token budget; then use recall_by_ids to fetch full bodies for the ids you want. Response is {results, total_matches, truncated, degraded_to_summary}; total_matches counts candidates after limit (not the whole corpus), truncated means the 30 KB cap trimmed rows, degraded_to_summary means full mode fell back to summary because a row exceeded the cap.',
+  'Search memories using full-text search, tag matching, and thermal scoring. Returns the most relevant memories. Pass output_mode="summary" for a lean projection (no observations body, related[] capped with related_total when capped) to triage under the harness token budget; then use recall_by_ids to fetch full bodies for the ids you want. Response is {results, total_matches, truncated, degraded_to_summary}; total_matches counts candidates after limit (not the whole corpus), truncated means the 30 KB cap trimmed rows, degraded_to_summary means full mode fell back to summary because a row exceeded the cap.',
   {
     query: z.string().describe('Search query text'),
     type: z.enum(MEMORY_TYPES).optional().describe('Filter by memory type'),
     tags: z.array(z.string()).optional().describe('Filter by tags'),
     tier: z.enum(['HOT', 'WARM', 'COLD']).optional().describe('Filter by thermal tier'),
     limit: z.number().min(1).max(50).optional().describe('Max results (default 10)'),
-    output_mode: z.enum(['full', 'summary']).optional().describe('Projection: "full" (default) returns observations bodies; "summary" returns lean triage rows'),
+    output_mode: z.enum(['full', 'summary']).optional().describe('Projection: "full" (default) returns observations bodies and every related edge; "summary" returns lean triage rows with at most 5 related edges — when more exist, related_total gives the true count and traverse fetches the rest'),
   },
   async ({ query, type, tags, tier, limit, output_mode }) => {
     const res = await recall({ query, type, tags, tier, limit, output_mode });
@@ -236,7 +236,7 @@ server.tool(
   'Fetch full memory bodies for specific ids (no search/scoring). Use after a summary-mode recall to drill into the memories you chose. Preserves input order, omits unknown ids, honors output_mode and the response cap.',
   {
     ids: z.array(z.string().uuid()).min(1).max(50).describe('Memory ids (uuids) to fetch, in the order to return them'),
-    output_mode: z.enum(['full', 'summary']).optional().describe('Projection: "full" (default) returns observations bodies; "summary" returns lean rows'),
+    output_mode: z.enum(['full', 'summary']).optional().describe('Projection: "full" (default) returns observations bodies and every related edge; "summary" returns lean rows with at most 5 related edges — when more exist, related_total gives the true count and traverse fetches the rest'),
   },
   async ({ ids, output_mode }) => {
     const res = await recallByIds({ ids, output_mode });
