@@ -232,8 +232,8 @@ describe('mergeMemories', () => {
         observations: m.observations as string, source: m.source as string,
         temperature: 0.5, tier: 'WARM',
       });
-      syncToFile(toEntity(srcMem));
-      syncToFile(toEntity(tgtMem));
+      await syncToFile(toEntity(srcMem));
+      await syncToFile(toEntity(tgtMem));
 
       const srcPath = join(memDir, 'fact_merge-orphan-source.md');
       const tgtPath = join(memDir, 'fact_merge-orphan-target.md');
@@ -243,7 +243,7 @@ describe('mergeMemories', () => {
       const srcSnapshot = toEntity(srcMem);
       await mergeMemories(srcMem.id, tgtMem.id);
       const current = await getMemory(tgtMem.id);
-      syncMerge(srcSnapshot, {
+      await syncMerge(srcSnapshot, {
         id: current!.id, name: current!.name, type: current!.type,
         observations: current!.observations as string, source: current!.source as string,
         temperature: 0.5, tier: 'WARM',

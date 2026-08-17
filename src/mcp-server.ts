@@ -101,7 +101,7 @@ server.tool(
       .returning({ id: entities.id, name: entities.name });
 
     // Dual-write to markdown
-    syncToFile({
+    await syncToFile({
       id: entity.id,
       name: entity.name,
       type,
@@ -280,7 +280,7 @@ server.tool(
     await db.delete(entities).where(eq(entities.id, id));
 
     // Remove markdown file
-    removeFile({
+    await removeFile({
       id: entity.id,
       name: entity.name,
       type: entity.type,
@@ -390,7 +390,7 @@ server.tool(
       .limit(1);
 
     // Sync to markdown with accurate temperature/tier
-    syncToFile({
+    await syncToFile({
       id: current.id,
       name: current.name,
       type: current.type,
@@ -676,7 +676,7 @@ server.tool(
       // found" if either row is missing (intelligence.ts), so reaching here
       // means both SELECTs returned a row.
       if (src && current) {
-        syncMerge(
+        await syncMerge(
           {
             id: src.id,
             name: src.name,

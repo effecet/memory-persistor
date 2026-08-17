@@ -35,6 +35,33 @@ interface MemoryEntity {
 export const DESCRIPTION_MAX = 40;
 
 /**
+ * Harness line cap for an auto-loaded MEMORY.md is 200; 170 leaves headroom.
+ * Output is ['# Memory Index', '', ...entries, ''] joined by '\n', so
+ * wc -l === entries + 2, or entries + 3 once a footer is appended.
+ *
+ * Any additional emitter of this index must share these values verbatim —
+ * see the updateMemoryIndex docstring.
+ */
+export const INDEX_LINE_BUDGET = 170;
+export const MAX_ENTRIES_NO_FOOTER = INDEX_LINE_BUDGET - 2;   // 168
+export const MAX_ENTRIES_WITH_FOOTER = INDEX_LINE_BUDGET - 3; // 167
+
+/** Retention order when the budget bites. Unknown tier → WARM (never drop blind). */
+export const TIER_RANK: Record<string, number> = { HOT: 0, WARM: 1, COLD: 2 };
+export const UNKNOWN_TIER_RANK = TIER_RANK.WARM;
+
+/** Types never dropped ahead of others when the budget bites — standing rules and
+ *  identity. A PRIORITY tier in the retention sort, not an exemption from the cap:
+ *  if protected entries alone exceed the budget they are still cut among
+ *  themselves, so the file cannot breach. */
+export const PROTECTED_TYPES = new Set(['user', 'feedback']);
+
+/** Overflow footer. '…' is U+2026, '—' is U+2014. Byte-identical across emitters. */
+export function indexFooter(n: number): string {
+  return `- …and ${n} more — use \`recall\``;
+}
+
+/**
  * Truncate a description to DESCRIPTION_MAX code points, preferring a word
  * boundary. Single source of truth for both frontmatter writes (buildMarkdown)
  * and index rebuilds (updateMemoryIndex) — belt-and-suspenders against drift
@@ -58,11 +85,10 @@ export function truncateDescription(input: string | undefined | null, max: numbe
 
 /**
  * Encode a filesystem path to Claude Code's project directory name.
- * Must mirror the project-path encoder,
- * which replaces BOTH `/` and `.` with `-`. Omitting the dot step caused
- * memories written from `/Users/<user.name>/...` to land in
- * `-Users-<user.name>-...` while the backup hook watched the dot-normalized
- * dir, producing silent file-mirror drift.
+ * Must mirror the project-path encoder, which replaces BOTH `/` and `.`
+ * with `-`. Omitting the dot step caused memories written from
+ * `/Users/<user.name>/...` to land in `-Users-<user.name>-...` while other
+ * tooling watched the dot-normalized dir, producing silent file-mirror drift.
  *
  * "/Users/foo.bar/baz" → "-Users-foo-bar-baz"
  */
@@ -76,7 +102,8 @@ export function encodeProjectPath(source: string): string {
  *
  * 120-char cap: APFS/ext4 allow 255 bytes; 120 leaves room for the
  * `<type>_` prefix and the `.md` suffix while lifting the ceiling that
- * previously forced very short memory names.
+ * previously forced very short memory names. Any other implementation of this
+ * slug must match exactly, or the two will disagree on a filename.
  */
 function slugify(name: string): string {
   return name
@@ -154,7 +181,10 @@ function unlinkQuietly(path: string): void {
  * strictly worse than the duplicate the sweep exists to prevent. The sweep
  * skips `filePath`, so the freshly-written file is never a candidate.
  */
-export function syncToFile(entity: MemoryEntity): void {
+export async function syncToFile(
+  entity: MemoryEntity,
+  thermal?: ThermalMap | null,
+): Promise<void> {
   const filePath = getFilePath(entity);
   const dir = getMemoryDir(entity.source);
 
@@ -167,7 +197,7 @@ export function syncToFile(entity: MemoryEntity): void {
     }
   }
 
-  updateMemoryIndex(dir);
+  await updateMemoryIndex(dir, thermal);
 }
 
 /**
@@ -213,7 +243,7 @@ function findFilesByPgId(dir: string, pgId: string): string[] {
  * id (i.e. files left over from past slug renames). Closes the gap
  * where `forget` only cleared the current-slug variant.
  */
-export function removeFile(entity: MemoryEntity): void {
+export async function removeFile(entity: MemoryEntity): Promise<void> {
   const dir = getMemoryDir(entity.source);
   const canonical = getFilePath(entity);
 
@@ -227,7 +257,7 @@ export function removeFile(entity: MemoryEntity): void {
   }
 
   if (existsSync(dir)) {
-    updateMemoryIndex(dir);
+    await updateMemoryIndex(dir);
   }
 }
 
@@ -253,9 +283,9 @@ export function removeFile(entity: MemoryEntity): void {
  *               (only id/name/type/source are read by removeFile)
  * @param target post-merge surviving entity
  */
-export function syncMerge(source: MemoryEntity, target: MemoryEntity): void {
-  removeFile(source);
-  syncToFile(target);
+export async function syncMerge(source: MemoryEntity, target: MemoryEntity): Promise<void> {
+  await removeFile(source);
+  await syncToFile(target);
 }
 
 /**
@@ -269,10 +299,12 @@ export function syncMerge(source: MemoryEntity, target: MemoryEntity): void {
  * When a frontmatter block is present, matching is scoped to it, so an
  * indented `key:` inside the body (a YAML snippet in a fenced code block, say)
  * cannot win. A leading BOM or blank lines before the opening `---` are
- * tolerated. Files with NO frontmatter block at all fall back to scanning the
- * first 800 characters, where that scoping guarantee does not hold — such
- * files are malformed for this purpose anyway, and the fallback only ever
- * feeds the index's display fields.
+ * tolerated: without that, the anchor fails and the whole read silently drops
+ * to the 800-char fallback, where the scoping guarantee does not hold and a
+ * top-level key in the BODY outranks a nested one in the frontmatter. Files
+ * with NO frontmatter block at all still take that fallback — they are
+ * malformed for this purpose anyway, and it only ever feeds display fields.
+ *
  *
  * @internal — exported for tests; not part of the MCP surface.
  */
@@ -284,6 +316,66 @@ export function readFrontmatterField(content: string, key: string): string {
   return raw.replace(/^["']|["']$/g, '');
 }
 
+export type ThermalRow = { tier: string; temperature: number };
+export type ThermalMap = Map<string, ThermalRow>;
+
+/**
+ * Batch-resolve live thermal state for the entities an index rebuild is about
+ * to rank. ONE query per rebuild, never one per file.
+ *
+ * Returns `null` when there is no Postgres information to rank on — the caller
+ * must then rank the WHOLE index on frontmatter. A partial fallback would rank
+ * fresh values against stale ones, the exact defect this lookup removes.
+ *
+ * An empty id list also returns `null`: a directory where no file carries a
+ * `pg_id` is the no-information case. Returning an empty map instead would
+ * classify every legacy file as an orphan and re-cut the index on filename
+ * alone. The orphan rule below targets an individual missing row, not a whole
+ * directory. Every emitter of this index implements the same contract.
+ *
+ * The `./db.js` import is deliberately dynamic: db.ts builds a pg.Pool at
+ * module scope, and a static import would open an idle pool in every consumer
+ * of file-sync — including the parity test's `node -e` subprocess, which would
+ * then never exit.
+ */
+export async function fetchThermalByPgId(pgIds: string[]): Promise<ThermalMap | null> {
+  const ids = pgIds.filter(id => /^[0-9a-fA-F-]{36}$/.test(id));
+  if (ids.length === 0) return null;
+  try {
+    // db.js MUST be imported before the DATABASE_URL check: importing it is what
+    // runs dotenv.config(), so checking process.env first reads an unpopulated
+    // env and falls back on every call.
+    const { db } = await import('./db.js');
+    const { sql } = await import('drizzle-orm');
+    if (!process.env.DATABASE_URL) {
+      process.stderr.write('[file-sync] no DATABASE_URL; ranking MEMORY.md on frontmatter\n');
+      return null;
+    }
+    // One comma-joined string parameter expanded by Postgres, NOT `= ANY(${ids})`:
+    // drizzle's sql template flattens a JS array into separate placeholders, so
+    // that form emits `ANY(($1))` with a scalar and fails at execution. This also
+    // keeps one SQL contract across every emitter.
+    const result = await db.execute(
+      sql`SELECT id, tier, temperature FROM public.entities
+          WHERE id = ANY(string_to_array(${ids.join(',')}, ',')::uuid[])`,
+    );
+    const map: ThermalMap = new Map();
+    for (const row of result.rows as Array<Record<string, unknown>>) {
+      map.set(String(row.id), {
+        tier: String(row.tier ?? ''),
+        temperature: Number(row.temperature ?? 0),
+      });
+    }
+    return map;
+  } catch (err) {
+    process.stderr.write(
+      `[file-sync] thermal lookup failed (${(err as Error).message}); ` +
+        'ranking MEMORY.md on frontmatter\n',
+    );
+    return null;
+  }
+}
+
 /**
  * Rebuild the MEMORY.md index by scanning all .md files in the directory.
  * Empty or missing `description:` fields fall back to the filename so the
@@ -291,34 +383,118 @@ export function readFrontmatterField(content: string, key: string): string {
  *
  * Line format is `- <type>: <name> — <description>`, NOT a markdown link and
  * NOT the filename. The name is what a human recognises and what `recall`
- * matches on; the filename is a slug nobody reads. Dropping the link cut a
- * 209-entry index from 26.7 KB to 16.8 KB; switching filename → name is
- * roughly byte-neutral (-1.4% measured over the same set).
+ * matches on; the filename is a slug nobody reads. Dropping the link cut the
+ * primary index from 26.7 KB to 16.8 KB; switching filename → name is
+ * roughly byte-neutral (-1.4% measured on 209 entries, 2026-08-08).
+ *
+ * If you add another emitter of this file, it MUST stay in sync with this one
+ * — whichever runs last wins, so a partial change silently flaps the format.
+ * This one fires on every remember/update/forget/merge.
+ *
+ * Budget rule (identical in every emitter): emit everything while entries
+ * <= MAX_ENTRIES_NO_FOOTER. Over that, rank PROTECTED_TYPES entries first, then
+ * by tier (HOT > WARM > COLD), then temperature descending, then filename;
+ * keep MAX_ENTRIES_WITH_FOOTER and append indexFooter(dropped). Unknown tier
+ * ranks as WARM — never drop what could not be classified. Protected types are
+ * a priority tier, not an exemption — if they alone exceed the budget they are
+ * still cut among themselves, so the file cannot breach it.
+ *
+ * Temperature and tier are read from POSTGRES, not from frontmatter: the
+ * nightly pg_cron decay updates the database only (Postgres cannot reach any
+ * machine's filesystem), so frontmatter goes stale between writes and ranking
+ * on it made the cut effectively alphabetical. `thermal` is `undefined` to
+ * fetch internally, an explicit map to use as-is, or explicit `null` to rank on
+ * frontmatter without attempting a lookup.
  *
  * @internal — exported for tests; not part of the MCP surface.
  */
-export function updateMemoryIndex(dir: string): void {
+export async function updateMemoryIndex(
+  dir: string,
+  thermal?: ThermalMap | null,
+): Promise<void> {
   const indexPath = join(dir, 'MEMORY.md');
 
   const files = readdirSync(dir)
     .filter(f => f.endsWith('.md') && f !== 'MEMORY.md')
     .sort();
 
-  const lines = ['# Memory Index', ''];
-
-  for (const file of files) {
+  // Parse every file once: display order is alphabetical, retention order is tiered.
+  const entries = files.map(file => {
     const content = readFileSync(join(dir, file), 'utf-8');
     // description deliberately does NOT go through readFrontmatterField: that
-    // helper strips surrounding quotes, and this line is compared byte-for-byte
-    // against indexes emitted by other tooling.
+    // helper strips surrounding quotes, and other emitters do not. Keep the
+    // raw match so every emitter produces byte-identical lines.
     const descMatch = content.match(/^description:[ \t]*(.*)$/m);
     const raw = descMatch?.[1]?.trim() ?? '';
     const desc = raw ? truncateDescription(raw) : file;
     const name = readFrontmatterField(content, 'name') || file.replace(/\.md$/, '');
     const type = readFrontmatterField(content, 'type') || 'unknown';
-    lines.push(`- ${type}: ${name} — ${desc}`);
+    const tier = (readFrontmatterField(content, 'tier') || '').toUpperCase();
+    const temp = Number.parseFloat(readFrontmatterField(content, 'temperature') || '');
+    return {
+      file,
+      pgId: readFrontmatterField(content, 'pg_id') || '',
+      line: `- ${type}: ${name} — ${desc}`,
+      rank: tier in TIER_RANK ? TIER_RANK[tier] : UNKNOWN_TIER_RANK,
+      temp: Number.isFinite(temp) ? temp : 0,
+      prot: PROTECTED_TYPES.has(type) ? 0 : 1,
+    };
+  });
+
+  // `undefined` = resolve our own; explicit `null` = rank on frontmatter with
+  // no lookup (tests and the golden-fixture parity harness).
+  const resolved =
+    thermal === undefined
+      ? await fetchThermalByPgId(entries.map(e => e.pgId).filter(Boolean))
+      : thermal;
+
+  if (resolved) {
+    let orphans = 0;
+    for (const e of entries) {
+      const row = e.pgId ? resolved.get(e.pgId) : undefined;
+      if (row) {
+        const t = row.tier.toUpperCase();
+        e.rank = t in TIER_RANK ? TIER_RANK[t] : UNKNOWN_TIER_RANK;
+        e.temp = Number.isFinite(row.temperature) ? row.temperature : 0;
+      } else {
+        // Reachable but no row: an orphan. Orphans must not outrank live
+        // memories, and per-entry frontmatter fallback is forbidden here — it
+        // would rank a stale value against fresh ones.
+        e.rank = UNKNOWN_TIER_RANK;
+        e.temp = 0;
+        orphans++;
+      }
+    }
+    if (orphans > 0) {
+      process.stderr.write(
+        `[file-sync] ${orphans} file(s) in ${dir} have no matching entity; ranked at temperature 0\n`,
+      );
+    }
   }
 
+  let kept = entries;
+  let dropped = 0;
+  if (entries.length > MAX_ENTRIES_NO_FOOTER) {
+    const survivors = new Set(
+      [...entries]
+        // Codepoint comparison, NOT localeCompare: display order above comes
+        // from readdirSync().sort(), which is codepoint order. localeCompare
+        // disagrees with that (e.g. 'Z-tie.md' sorts before 'a-tie.md' by
+        // codepoint — uppercase precedes lowercase in ASCII — but AFTER it
+        // under locale-aware collation), so a localeCompare tie-break here
+        // could pick a different survivor than this same file's own display
+        // sort, and disagrees with a plain string comparison too.
+        .sort((a, b) => a.prot - b.prot || a.rank - b.rank || b.temp - a.temp ||
+                        (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))
+        .slice(0, MAX_ENTRIES_WITH_FOOTER)
+        .map(e => e.file),
+    );
+    kept = entries.filter(e => survivors.has(e.file));
+    dropped = entries.length - kept.length;
+  }
+
+  const lines = ['# Memory Index', '', ...kept.map(e => e.line)];
+  if (dropped > 0) lines.push(indexFooter(dropped));
   lines.push('');
   writeFileSync(indexPath, lines.join('\n'), 'utf-8');
 }

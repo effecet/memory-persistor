@@ -46,7 +46,7 @@ describe('file-sync integration', () => {
     });
     createdIds.push(entity.id);
 
-    syncToFile({
+    await syncToFile({
       id: entity.id,
       name: 'file-sync-test-create',
       type: 'fact',
@@ -80,7 +80,7 @@ describe('file-sync integration', () => {
     createdIds.push(entity.id);
 
     // First write
-    syncToFile({
+    await syncToFile({
       id: entity.id,
       name: 'file-sync-test-update',
       type: 'project',
@@ -91,7 +91,7 @@ describe('file-sync integration', () => {
     });
 
     // Second write with updated observations
-    syncToFile({
+    await syncToFile({
       id: entity.id,
       name: 'file-sync-test-update',
       type: 'project',
@@ -133,12 +133,12 @@ describe('file-sync integration', () => {
     };
 
     // Create the file first
-    syncToFile(entityPayload);
+    await syncToFile(entityPayload);
     const filePath = join(encodedDir, 'decision_file-sync-test-remove.md');
     expect(existsSync(filePath)).toBe(true);
 
     // Remove it
-    removeFile(entityPayload);
+    await removeFile(entityPayload);
     expect(existsSync(filePath)).toBe(false);
   });
 });

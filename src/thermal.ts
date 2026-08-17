@@ -184,10 +184,24 @@ export async function decayAll(): Promise<{ count: number; synced: number }> {
     RETURNING e.id, e.name, e.type, e.observations, e.temperature, e.tier, e.source, e.importance, e.access_count
   `);
 
+  const rows = result.rows as any[];
+
+  // Rank the index once per directory, on the LAST write into that directory.
+  // Earlier writes to the same dir skip the thermal lookup entirely (null); the
+  // final one fetches (undefined) and therefore sees every file in the dir,
+  // decayed or not.
+  //
+  // Passing a map built from `rows` instead would be wrong: it covers only the
+  // entities that decayed, so every non-decayed neighbour in the same directory
+  // would resolve as an orphan and be ranked at temperature 0 — a single decay
+  // run would evict them all from the index.
+  const lastIndexInDir = new Map<string, number>();
+  rows.forEach((row, i) => lastIndexInDir.set(String(row.source), i));
+
   let synced = 0;
-  for (const row of result.rows as any[]) {
+  for (const [i, row] of rows.entries()) {
     try {
-      syncToFile({
+      await syncToFile({
         id: row.id,
         name: row.name,
         type: row.type,
@@ -197,7 +211,7 @@ export async function decayAll(): Promise<{ count: number; synced: number }> {
         source: row.source,
         importance: row.importance ?? 0.5,
         accessCount: row.access_count ?? 0,
-      });
+      }, lastIndexInDir.get(String(row.source)) === i ? undefined : null);
       synced++;
     } catch {
       // Non-fatal: Postgres is the source of truth
