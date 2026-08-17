@@ -328,6 +328,7 @@ scripts/
   backfill-edges.ts          # One-time auto-relate backfill
   backfill-embeddings.ts     # One-time embedding backfill for NULL rows
   decay-remote.ts            # Manual decay pass (SQL half + the markdown half)
+  precache-embed-model.ts    # CI helper: warm the bge-small model cache
 tests/
   *.test.ts           # Unit tests (Vitest)
   *.py                # Python tests (pytest)
