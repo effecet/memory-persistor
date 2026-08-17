@@ -143,10 +143,11 @@ export async function bump(id: string): Promise<void> {
  * Syncs updated temperature/tier to markdown files.
  */
 export async function decayAll(): Promise<{ count: number; synced: number }> {
-  // The decay contract lives in ONE place: drizzle/0010_thermal_decay_function.sql,
-  // pinned against src/config.ts by tests/test_thermal_decay_migration.py. It used
-  // to exist twice — here, and hand-transcribed into a live cron.job row on the
-  // managed instance that was in no migration and no script.
+  // The decay contract this path uses lives in drizzle/0010_thermal_decay_function.sql,
+  // pinned against src/config.ts by tests/test_thermal_decay_migration.py. It used to
+  // be duplicated here as an inline CTE as well. (initdb/01-pg-cron.sql still carries
+  // its own inline copies for local-Docker bootstrap and decay_catchup — see the
+  // migration header.)
   //
   // TypeScript keeps only the file-sync half below, which SQL structurally cannot
   // own: Postgres has no access to any machine's filesystem, which is exactly why

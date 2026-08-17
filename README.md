@@ -102,11 +102,12 @@ graph TD
     subgraph DB["PostgreSQL 17 + pg_trgm + pgvector + pg_cron"]
         PG[(Entities + embedding<br/>+ Relations + Versions + Events)]
         PQ[(Pending)]
-        CRON[pg_cron<br/>Nightly decay]
+        CRON["pg_cron<br/>memory_thermal_decay()<br/>drizzle/0010"]
     end
 
     subgraph Sync["Optional"]
         FS[file-sync.ts<br/>mirror memories to markdown]
+        IDX[MEMORY.md index<br/>170-line budget<br/>ranked on live thermal state]
         CAN[events_canary.py<br/>event-freshness check]
     end
 
@@ -115,6 +116,9 @@ graph TD
     INT --> PG
     OBS --> PG
     SERVER --> FS
+    FS --> IDX
+    PG -.->|batched pg_id &rarr; tier, temp| IDX
+    CRON --> PG
     SERVER --> PEND
     PEND --> PQ
     CAN -.->|polls events<br/>alert on silence| PG
@@ -243,11 +247,20 @@ never outrank a live memory.
 
 The decay contract is version-controlled in
 `drizzle/0010_thermal_decay_function.sql`, which creates
-`public.memory_thermal_decay()` and schedules it. Keeping it in a migration
-rather than only as a live `cron.job` row is what makes it reviewable and
-reproducible — `make cron-verify` asserts the live job still matches the
+`public.memory_thermal_decay()` and points the schedule at it. Keeping it in a
+migration rather than only as a live `cron.job` row is what makes it reviewable
+and reproducible — `make cron-verify` asserts the live job still matches the
 committed migration, and `tests/test_thermal_decay_migration.py` fails if a
 constant in `src/config.ts` moves without the SQL.
+
+> **Local Docker has two other inline copies of the decay SQL.**
+> `initdb/01-pg-cron.sql` runs at container init, *before* any migration, so it
+> seeds `memory-thermal-decay` with its own inline CTE; applying `0010`
+> afterwards unschedules and replaces it, so the function wins on any container
+> where migrations ran. Its `decay_catchup()` (`@reboot` catch-up) keeps a
+> separate inline copy that `0010` does **not** replace. If you change the decay
+> maths, change `initdb/01-pg-cron.sql` too — the migration guard does not cover
+> it. A managed instance is unaffected: it never runs `initdb/`.
 
 `decayAll()` in `src/thermal.ts` calls that same function and then does the
 markdown half, which SQL structurally cannot: Postgres has no access to any
@@ -280,6 +293,16 @@ make clean             # remove volumes and generated files
 
 Each command has a `-remote` variant (`dev-remote`, `status-remote`, `decay-remote`,
 `canary-remote`, `cron-status-remote`) that targets the connection in `.env.supabase`.
+
+> **`make test-integration` refuses a non-local database.** The suite issues
+> unconditional, table-wide `DELETE`s, so `tests/integration/db-guard.ts` requires
+> `DATABASE_URL` to point at localhost. A CI job whose Postgres is a *service
+> container* (reachable by service name, not localhost) can opt in with
+> `ALLOW_NONLOCAL_INTEGRATION_DB=1`. That opt-in is deliberately **not** wired to
+> `CI=true` — plenty of local tooling exports that, and treating it as consent
+> would silently disarm the guard on a developer machine. Managed hosts
+> (`supabase.com` / `supabase.co` / any `pooler`) are on an unconditional denylist
+> that no opt-in lifts.
 
 ### Project Structure
 

@@ -2,11 +2,24 @@
 --
 -- Version-controls the nightly thermal decay.
 --
--- Before this migration the decay query existed ONLY as a live row in cron.job
--- on the managed instance — in no migration, no script, and
--- `grep -rn "cron.schedule"` over the repo returned nothing. Capture the live
--- command before applying this if you are in the same position; the schedule
--- it replaces was a nightly `0 6 * * *`.
+-- WHY: the decay query was previously duplicated as raw SQL at each place that
+-- ran it, so the definition that actually executed nightly depended on which
+-- environment you were in. On a managed instance it typically lived ONLY as a
+-- live `cron.job` row — in no migration and no script — where it could drift
+-- from src/config.ts with nothing to catch it. This migration makes the
+-- function the single definition and points the schedule at it.
+--
+-- KNOWN REMAINING COPIES (local Docker only — see initdb/01-pg-cron.sql):
+--   1. That file's own `cron.schedule('memory-thermal-decay', ...)` seeds the
+--      job with an inline CTE at container-init time, before any migration has
+--      run. Applying this migration afterwards unschedules and replaces it, so
+--      the function wins — but on a container where 0010 was never applied, the
+--      inline copy is what runs.
+--   2. `public.decay_catchup()` in the same file mirrors the decay SQL inline
+--      for its `@reboot` catch-up pass and is NOT replaced by this migration.
+-- Both are pinned to the same constants by tests/test_thermal_decay_migration.py
+-- only insofar as that guard covers THIS file; a change to the decay maths must
+-- still be applied to initdb/01-pg-cron.sql by hand.
 --
 -- Constants below are duplicated from src/config.ts and pinned by
 -- tests/test_thermal_decay_migration.py. Note that 0.1 encodes
