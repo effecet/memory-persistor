@@ -109,9 +109,9 @@ describe('fetchThermalByPgId integration', () => {
       `console.log(JSON.stringify(m === null ? null : [...m.entries()]));`;
 
     // Honor the harness's dotenv path — `make test-integration` points it at a
-    // throwaway env file for the isolated effece_memory_test DB. Hardcoding
-    // '.env' would send the subprocess to the dev DB, where the row just seeded
-    // here does not exist.
+    // throwaway env file for an isolated test database. Hardcoding '.env' would
+    // send the subprocess to the dev DB, where the row just seeded here does
+    // not exist.
     const env = { ...process.env, DOTENV_CONFIG_PATH: process.env.DOTENV_CONFIG_PATH ?? '.env' };
     delete env.DATABASE_URL;
 
