@@ -181,6 +181,9 @@ export async function decayAll(): Promise<{ count: number; synced: number }> {
         source: row.source,
         importance: row.importance ?? 0.5,
         accessCount: row.access_count ?? 0,
+        // Round-trip origin_host. Before the function returned it, every decayed
+        // file had its real origin_host overwritten with `unknown`, nightly.
+        originHost: row.origin_host ?? undefined,
       }, lastIndexInDir.get(String(row.source)) === i ? undefined : null);
       synced++;
     } catch {

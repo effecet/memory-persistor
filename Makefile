@@ -25,9 +25,21 @@ rebuild: ## Force rebuild Postgres image (after Dockerfile changes)
 	@echo "Waiting for Postgres to be ready..."
 	@$(DOCKER_COMPOSE) exec postgres pg_isready -U $(PG_USER) -d $(PG_DB) --timeout=30
 
-migrate: ## Run Drizzle migrations (generate + migrate)
-	npx drizzle-kit generate
-	npx drizzle-kit migrate
+# Applies the hand-written SQL in drizzle/ IN ORDER, via psql.
+#
+# This deliberately does NOT run `drizzle-kit generate`. `drizzle/meta/` is
+# gitignored, so the generator has no snapshot history and emits a from-scratch
+# schema — correct against an empty database, destructive against a populated
+# one. Every file in drizzle/ is hand-written and individually idempotent
+# (IF NOT EXISTS / CREATE OR REPLACE / DROP+CREATE), so replaying them all is
+# safe and is what makes this target re-runnable.
+migrate: ## Apply the hand-written SQL migrations in order (local Docker)
+	@set -e; for f in drizzle/0*.sql; do \
+		echo "→ $$f"; \
+		$(DOCKER_COMPOSE) exec -T postgres psql -U $(PG_USER) -d $(PG_DB) \
+			-v ON_ERROR_STOP=1 -q -f - < "$$f"; \
+	done
+	@echo "migrations applied"
 
 seed: ## Seed memories from $CLAUDE_DIR/projects/*/memory/ (optional file-sync)
 	npx tsx src/import.ts

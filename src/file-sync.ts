@@ -15,7 +15,7 @@
  *   ---
  *   <observations>
  */
-import { readFileSync, readdirSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, unlinkSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { CLAUDE_DIR } from './config.js';
 
@@ -47,14 +47,14 @@ export const MAX_ENTRIES_NO_FOOTER = INDEX_LINE_BUDGET - 2;   // 168
 export const MAX_ENTRIES_WITH_FOOTER = INDEX_LINE_BUDGET - 3; // 167
 
 /** Retention order when the budget bites. Unknown tier → WARM (never drop blind). */
-export const TIER_RANK: Record<string, number> = { HOT: 0, WARM: 1, COLD: 2 };
+export const TIER_RANK: Readonly<Record<string, number>> = Object.freeze({ HOT: 0, WARM: 1, COLD: 2 });
 export const UNKNOWN_TIER_RANK = TIER_RANK.WARM;
 
 /** Types never dropped ahead of others when the budget bites — standing rules and
  *  identity. A PRIORITY tier in the retention sort, not an exemption from the cap:
  *  if protected entries alone exceed the budget they are still cut among
  *  themselves, so the file cannot breach. */
-export const PROTECTED_TYPES = new Set(['user', 'feedback']);
+export const PROTECTED_TYPES: ReadonlySet<string> = new Set(['user', 'feedback']);
 
 /** Overflow footer. '…' is U+2026, '—' is U+2014. Byte-identical across emitters. */
 export function indexFooter(n: number): string {
@@ -168,6 +168,31 @@ function unlinkQuietly(path: string): void {
 }
 
 /**
+ * True when two paths resolve to the SAME file on disk.
+ *
+ * A string comparison is not enough. On a case-insensitive volume (APFS and
+ * NTFS by default) a pre-existing `Fact_Old.md` and a freshly-written
+ * `fact_old.md` are one file, but `readdirSync` still reports the on-disk
+ * casing — so `stale !== filePath` is true and the sweep below would delete the
+ * file it just wrote, leaving the entity with NO markdown at all. Comparing
+ * device + inode is exact on every platform and also covers hard links.
+ *
+ * Falls back to a string compare only if either stat fails (a racing unlink),
+ * which is the conservative direction: a missed delete leaves a duplicate the
+ * next write reconciles, whereas a wrong delete loses the file.
+ */
+function isSameFile(a: string, b: string): boolean {
+  if (a === b) return true;
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    return sa.ino === sb.ino && sa.dev === sb.dev;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Write or update a memory file and update the MEMORY.md index.
  *
  * Deletes any file in the dir carrying this entity's pg_id under a
@@ -178,8 +203,12 @@ function unlinkQuietly(path: string): void {
  *
  * Order is load-bearing: write FIRST, then sweep. Sweeping first would leave
  * the entity with zero markdown files if writeFileSync then threw, which is
- * strictly worse than the duplicate the sweep exists to prevent. The sweep
- * skips `filePath`, so the freshly-written file is never a candidate.
+ * strictly worse than the duplicate the sweep exists to prevent.
+ *
+ * The sweep skips the freshly-written file by DEVICE+INODE, not by path string
+ * — see isSameFile. On a case-insensitive volume an existing `Fact_Old.md` and
+ * a written `fact_old.md` are the same file under two spellings, and a string
+ * compare would delete what was just written.
  */
 export async function syncToFile(
   entity: MemoryEntity,
@@ -192,7 +221,7 @@ export async function syncToFile(
   writeFileSync(filePath, buildMarkdown(entity), 'utf-8');
 
   for (const stale of findFilesByPgId(dir, entity.id)) {
-    if (stale !== filePath) {
+    if (!isSameFile(stale, filePath)) {
       unlinkQuietly(stale);
     }
   }
@@ -243,7 +272,10 @@ function findFilesByPgId(dir: string, pgId: string): string[] {
  * id (i.e. files left over from past slug renames). Closes the gap
  * where `forget` only cleared the current-slug variant.
  */
-export async function removeFile(entity: MemoryEntity): Promise<void> {
+export async function removeFile(
+  entity: MemoryEntity,
+  thermal?: ThermalMap | null,
+): Promise<void> {
   const dir = getMemoryDir(entity.source);
   const canonical = getFilePath(entity);
 
@@ -257,7 +289,7 @@ export async function removeFile(entity: MemoryEntity): Promise<void> {
   }
 
   if (existsSync(dir)) {
-    await updateMemoryIndex(dir);
+    await updateMemoryIndex(dir, thermal);
   }
 }
 
@@ -283,9 +315,13 @@ export async function removeFile(entity: MemoryEntity): Promise<void> {
  *               (only id/name/type/source are read by removeFile)
  * @param target post-merge surviving entity
  */
-export async function syncMerge(source: MemoryEntity, target: MemoryEntity): Promise<void> {
-  await removeFile(source);
-  await syncToFile(target);
+export async function syncMerge(
+  source: MemoryEntity,
+  target: MemoryEntity,
+  thermal?: ThermalMap | null,
+): Promise<void> {
+  await removeFile(source, thermal);
+  await syncToFile(target, thermal);
 }
 
 /**
@@ -339,7 +375,7 @@ export type ThermalMap = Map<string, ThermalRow>;
  * then never exit.
  */
 export async function fetchThermalByPgId(pgIds: string[]): Promise<ThermalMap | null> {
-  const ids = pgIds.filter(id => /^[0-9a-fA-F-]{36}$/.test(id));
+  const ids = pgIds.filter(id => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id));
   if (ids.length === 0) return null;
   try {
     // db.js MUST be imported before the DATABASE_URL check: importing it is what

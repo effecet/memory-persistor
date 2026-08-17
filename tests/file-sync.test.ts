@@ -228,13 +228,13 @@ describe('updateMemoryIndex', () => {
     try {
       writeFileSync(
         join(dir, 'legacy.md'),
-        `---\nname: prolific-api-researcher-only\ndescription: Researcher-scoped only\n` +
+        `---\nname: some-scoped-reference\ndescription: Scoped only\n` +
           `metadata:\n  node_type: memory\n  type: reference\n---\nbody\n`,
         'utf-8',
       );
       await updateMemoryIndex(dir);
       const index = readFileSync(join(dir, 'MEMORY.md'), 'utf-8');
-      expect(index).toContain('- reference: prolific-api-researcher-only — Researcher-scoped only');
+      expect(index).toContain('- reference: some-scoped-reference — Scoped only');
       expect(index).not.toContain('unknown:');
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -542,6 +542,41 @@ describe('removeFile pg_id glob', () => {
     ].join('\n');
   }
 
+  it('does not delete the file it just wrote when an existing file differs only by case', async () => {
+    // On a case-insensitive volume (APFS/NTFS default) a pre-existing
+    // `Fact_Old.md` and a written `fact_old.md` are ONE file, but readdirSync
+    // reports the on-disk casing. A path-string sweep therefore sees
+    // `.../Fact_Old.md !== .../fact_old.md`, unlinks it, and leaves the entity
+    // with zero markdown. The sweep must compare device+inode instead.
+    const { source, dir, projectDir } = makeIsolatedSource();
+    try {
+      const pgId = '88888888-8888-4888-8888-888888888888';
+      // Seed an externally-created file with non-lowercase casing carrying the pg_id.
+      writeFileSync(
+        join(dir, 'Fact_Casing.md'),
+        `---\nname: Casing\ntype: fact\npg_id: ${pgId}\n---\n\nold body\n`,
+        'utf-8',
+      );
+
+      await syncToFile({
+        id: pgId,
+        name: 'casing',
+        type: 'fact',
+        observations: 'new body',
+        source,
+        temperature: 0.5,
+        tier: 'WARM',
+      }, null);
+
+      const written = readdirSync(dir).filter(f => f.endsWith('.md') && f !== 'MEMORY.md');
+      // Exactly one file survives, and it holds the NEW content.
+      expect(written).toHaveLength(1);
+      expect(readFileSync(join(dir, written[0]), 'utf-8')).toContain('new body');
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it('caps the filename slug at 120 chars, not 60', async () => {
     const { source, dir, projectDir } = makeIsolatedSource();
     try {
@@ -614,7 +649,7 @@ describe('removeFile pg_id glob', () => {
         source,
         temperature: 0.5,
         tier: 'WARM',
-      });
+      }, null);
       const canonicalPath = join(dir, 'fact_current-name.md');
       expect(existsSync(canonicalPath)).toBe(true);
 
@@ -634,7 +669,7 @@ describe('removeFile pg_id glob', () => {
         source,
         temperature: 0.5,
         tier: 'WARM',
-      });
+      }, null);
 
       expect(existsSync(canonicalPath)).toBe(false);
       expect(existsSync(orphanPath)).toBe(false);
@@ -667,7 +702,7 @@ describe('removeFile pg_id glob', () => {
         source,
         temperature: 0.5,
         tier: 'WARM',
-      });
+      }, null);
 
       expect(existsSync(join(dir, 'fact_new-name.md'))).toBe(true);
       expect(existsSync(orphanPath)).toBe(false);
@@ -701,7 +736,7 @@ describe('removeFile pg_id glob', () => {
         source,
         temperature: 0.5,
         tier: 'WARM',
-      });
+      }, null);
 
       // Bystander frontmatter holds a different pg_id, body mentions ours.
       const bystanderPath = join(dir, 'fact_bystander.md');
@@ -719,7 +754,7 @@ describe('removeFile pg_id glob', () => {
         source,
         temperature: 0.5,
         tier: 'WARM',
-      });
+      }, null);
 
       expect(existsSync(bystanderPath)).toBe(true);
     } finally {
@@ -744,7 +779,7 @@ describe('removeFile pg_id glob', () => {
         source,
         temperature: 0.5,
         tier: 'WARM',
-      });
+      }, null);
 
       expect(existsSync(orphanPath)).toBe(false);
     } finally {
@@ -804,15 +839,15 @@ describe('syncMerge', () => {
         name: 'surviving target name', type: 'project',
         observations: 'target body merged', source, temperature: 0.5, tier: 'WARM',
       };
-      await syncToFile(srcEntity);
-      await syncToFile(tgtEntity);
+      await syncToFile(srcEntity, null);
+      await syncToFile(tgtEntity, null);
 
       const srcPath = join(dir, 'project_old-source-name.md');
       const tgtPath = join(dir, 'project_surviving-target-name.md');
       expect(existsSync(srcPath)).toBe(true);
       expect(existsSync(tgtPath)).toBe(true);
 
-      await syncMerge(srcEntity, tgtEntity);
+      await syncMerge(srcEntity, tgtEntity, null);
 
       expect(existsSync(srcPath)).toBe(false);
       expect(existsSync(tgtPath)).toBe(true);
@@ -837,13 +872,13 @@ describe('syncMerge', () => {
         name: 'shared name', type: 'fact',
         observations: 'original', source, temperature: 0.5, tier: 'WARM',
       };
-      await syncToFile(shared);
+      await syncToFile(shared, null);
       const sharedPath = join(dir, 'fact_shared-name.md');
       expect(existsSync(sharedPath)).toBe(true);
 
       const sourceSnapshot = { ...shared, observations: '', temperature: 0, tier: '' };
       const survivor = { ...shared, observations: 'merged survivor body' };
-      await syncMerge(sourceSnapshot, survivor);
+      await syncMerge(sourceSnapshot, survivor, null);
 
       expect(existsSync(sharedPath)).toBe(true);
       expect(readFileSync(sharedPath, 'utf-8')).toContain('merged survivor body');

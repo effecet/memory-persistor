@@ -41,7 +41,7 @@ Docker container.
 # Local Docker (easiest to try)
 cp .env.example .env          # configure credentials
 make up                       # start Postgres + pg_cron (Docker)
-make migrate                  # run Drizzle schema migrations
+make migrate                  # apply the hand-written SQL migrations (psql)
 make dev                      # start the MCP server
 
 # Managed Postgres (e.g. Supabase)

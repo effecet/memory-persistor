@@ -17,9 +17,14 @@
 --      inline copy is what runs.
 --   2. `public.decay_catchup()` in the same file mirrors the decay SQL inline
 --      for its `@reboot` catch-up pass and is NOT replaced by this migration.
--- Both are pinned to the same constants by tests/test_thermal_decay_migration.py
--- only insofar as that guard covers THIS file; a change to the decay maths must
--- still be applied to initdb/01-pg-cron.sql by hand.
+--   3. `scripts/memory-decay.py` (the `make decay` path) carries a THIRD inline
+--      copy that has ALREADY DRIFTED: it applies a flat `temperature * 0.85`
+--      with no access_bitmap pattern term and no importance drift, i.e. the
+--      pre-v3 model. Treat `make decay` as legacy until it is repointed at this
+--      function.
+-- tests/test_thermal_decay_migration.py pins THIS file against src/config.ts
+-- and nothing else, so a change to the decay maths must still be applied to
+-- initdb/01-pg-cron.sql and scripts/memory-decay.py by hand.
 --
 -- Constants below are duplicated from src/config.ts and pinned by
 -- tests/test_thermal_decay_migration.py. Note that 0.1 encodes
@@ -39,14 +44,25 @@
 -- runs its syncToFile loop over the returned rows, so the TypeScript keeps the
 -- file-sync half that SQL structurally cannot own.
 --
--- Idempotent: CREATE OR REPLACE, plus an unschedule guard before cron.schedule
--- (pg_cron only made schedule upsert-by-name in 1.4; the guard makes this safe
--- on older builds too). Apply local Docker first, then the managed instance.
+-- Idempotent: DROP FUNCTION IF EXISTS + CREATE (see below for why a bare
+-- CREATE OR REPLACE is not enough), plus an unschedule guard before
+-- cron.schedule (pg_cron only made schedule upsert-by-name in 1.4; the guard
+-- makes this safe on older builds too). Apply local Docker first, then the managed instance.
 -- Never run `make migrate` or `npx drizzle-kit generate` — migrations here are
 -- hand-written and drizzle/meta/ is gitignored, so the generator would emit a
 -- destructive from-scratch schema.
 
-CREATE OR REPLACE FUNCTION public.memory_thermal_decay()
+-- DROP first, then CREATE. `CREATE OR REPLACE` alone CANNOT change a
+-- RETURNS TABLE column list: Postgres rejects it with `cannot change return
+-- type of existing function / Row type defined by OUT parameters is different`.
+-- Without this DROP, a future migration that adds or renames a returned column
+-- fails on every database where this file already ran while passing on a fresh
+-- CI database — the worst failure asymmetry there is. Nothing depends on this
+-- function (the cron job stores a command string, not a dependency), so the
+-- DROP is safe.
+DROP FUNCTION IF EXISTS public.memory_thermal_decay();
+
+CREATE FUNCTION public.memory_thermal_decay()
 RETURNS TABLE (
   id            uuid,
   name          text,
@@ -56,7 +72,8 @@ RETURNS TABLE (
   tier          text,
   source        text,
   importance    real,
-  access_count  integer
+  access_count  integer,
+  origin_host   text
 )
 LANGUAGE plpgsql
 AS $fn$
@@ -108,10 +125,14 @@ BEGIN
       e.tier         AS d_tier,
       e.source       AS d_source,
       e.importance   AS d_importance,
-      e.access_count AS d_access_count
+      e.access_count AS d_access_count,
+      e.origin_host  AS d_origin_host
   )
+  -- origin_host is returned so the caller can round-trip it into the markdown
+  -- frontmatter. Omitting it made decayAll() rewrite `origin_host: unknown`
+  -- over the real value on every decayed file, nightly.
   SELECT d_id, d_name, d_type, d_observations, d_temperature,
-         d_tier, d_source, d_importance, d_access_count
+         d_tier, d_source, d_importance, d_access_count, d_origin_host
   FROM decayed;
 
   -- Pass 2 — flag memories COLD for 30+ days as stale. Separate statement so it
@@ -134,20 +155,26 @@ $fn$;
 -- whatever POSTGRES_DB/POSTGRES_USER you configured). Not hardcoded, so the one
 -- migration stays portable.
 --
--- GUARDED ON THE cron SCHEMA EXISTING. pg_cron is installed per-database, and
--- the ephemeral databases this migration also runs against do NOT have it:
--- `make test-integration` builds a fresh test database and applies every
--- drizzle/0*.sql to it, and CI does the same against a bare postgres service.
--- Unguarded, `SELECT cron.unschedule(...)` fails with
--- `ERROR: schema "cron" does not exist` and aborts the WHOLE migration run,
--- taking the integration suite down with it.
+-- GUARDED ON THE cron SCHEMA EXISTING. pg_cron is installed per-database, so
+-- any database that does not have it — an ephemeral CI or test database, or a
+-- managed instance where the extension was never enabled — would otherwise hit
+-- `ERROR: schema "cron" does not exist` on `cron.unschedule(...)` and abort the
+-- WHOLE migration run. The guard makes the function itself installable
+-- everywhere and the scheduling best-effort.
 --
 -- The scheduling is a deployment concern, not a schema concern — a database
 -- without pg_cron still gets the function, which is all the tests need.
 DO $sched$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'cron') THEN
-    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'memory-thermal-decay') THEN
+    -- Scoped to the CURRENT database: cron.job is cluster-wide and fully
+    -- visible to a superuser, so an unscoped unschedule applied in a second
+    -- database would tear down the first database's job.
+    IF EXISTS (
+      SELECT 1 FROM cron.job
+      WHERE jobname = 'memory-thermal-decay'
+        AND database = current_database()
+    ) THEN
       PERFORM cron.unschedule('memory-thermal-decay');
     END IF;
     PERFORM cron.schedule(
