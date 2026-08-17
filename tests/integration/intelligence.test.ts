@@ -285,7 +285,7 @@ describe('mergeMemories', () => {
 
       expect(existsSync(srcPath)).toBe(false);
       expect(existsSync(tgtPath)).toBe(true);
-      // Index line format is `- <type>: <name> — <desc>` as of 2026-08-08, so the
+      // Index line format is `- <type>: <name> — <desc>`, so the
       // old slug assertions ('merge-orphan-source'/'-target') no longer match
       // anything and passed/failed for the wrong reasons. Asserting on the bare
       // name is also unsafe here: the merged target's description embeds a

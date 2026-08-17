@@ -4,7 +4,7 @@
  * WHY THIS FILE EXISTS: the unit tests in tests/file-sync.test.ts all *inject* a
  * ThermalMap, so none of them execute the query. That left the actual hot path —
  * the lookup every remember/update/forget/merge performs — completely unexercised,
- * and it shipped broken twice on 2026-08-16:
+ * and it has shipped broken twice:
  *
  *   1. `WHERE id = ANY(${ids})` — drizzle's sql template flattens a JS array into
  *      separate placeholders, emitting `ANY(($1))` with a scalar. Every call threw
@@ -93,8 +93,8 @@ describe('fetchThermalByPgId integration', () => {
   it('resolves DATABASE_URL from dotenv in a clean environment', async () => {
     // Bug #2 above is INVISIBLE to the tests in this file: vitest's harness has
     // already populated process.env.DATABASE_URL by the time they run, so an
-    // env-check-before-dotenv ordering still passes. Verified by control on
-    // 2026-08-16 — reintroducing that bug left all the other cases green.
+    // env-check-before-dotenv ordering still passes. Verified by control:
+    // reintroducing that bug left all the other cases in this file green.
     //
     // Reproducing it requires a subprocess with DATABASE_URL genuinely unset,
     // where importing db.js (which runs dotenv.config) is the only thing that

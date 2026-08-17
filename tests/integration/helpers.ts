@@ -2,34 +2,28 @@
  * Shared helpers for integration tests.
  * Tests run against the real Docker Postgres instance.
  */
-import * as dotenv from 'dotenv';
-// Resolve DATABASE_URL exactly the way src/db.ts does — same path, same
-// `override: true` — so the guard below validates the URL the code under test
-// will ACTUALLY connect to.
-//
-// This was `import 'dotenv/config'`, which reads ./.env and does NOT override
-// an already-set DATABASE_URL. src/db.ts then re-read DOTENV_CONFIG_PATH with
-// override:true and got a different answer, giving the suite two pools with
-// two targets: `testDb` here, and the pool behind addPending/recall/update in
-// src/. The guard only ever saw the first one.
-//
-// That made the guard's headline scenario a false negative. Under
-// `DOTENV_CONFIG_PATH=.env.supabase npx vitest run tests/integration/`, this
-// module is imported before src/pending.js in every integration test, so the
-// assert ran on ./.env's localhost URL and PASSED — then src/db.ts overrode
-// DATABASE_URL to the pooler and every CRUD write in the suite landed on the
-// shared brain, while the unconditional `testDb.delete(pending)` afterEach
-// wiped localhost instead. Observed 2026-08-11.
-dotenv.config({ path: process.env.DOTENV_CONFIG_PATH, override: true });
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import { eq, sql } from 'drizzle-orm';
 import { entities, memoryRelations } from '../../src/schema.js';
 import * as schema from '../../src/schema.js';
 import { EMBED_DIMS } from '../../src/config.js';
+import * as dotenv from 'dotenv';
 import { assertSafeIntegrationTarget } from './db-guard.js';
 
 const { Pool } = pg;
+
+// Apply the SAME dotenv resolution src/db.ts uses, BEFORE the guard reads
+// DATABASE_URL — and it must be the ONLY resolution here. A plain
+// `import 'dotenv/config'` reads ./.env and does NOT override an already-set
+// DATABASE_URL, while src/db.ts re-resolves DOTENV_CONFIG_PATH with
+// `override: true`. Having both gives the suite two pools with two targets:
+// `testDb` below, and the pool behind the functions under test in src/. The
+// guard would only ever see the first, so a run like
+//   DATABASE_URL=<localhost> DOTENV_CONFIG_PATH=<managed> vitest
+// would satisfy the guard and then write to the managed database anyway.
+// tests/db-guard.test.ts pins this pairing at the source level.
+dotenv.config({ path: process.env.DOTENV_CONFIG_PATH, override: true });
 
 // Guard against running this suite against a shared managed database.
 // Enforced at module load, before the pool is constructed, so it protects
