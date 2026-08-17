@@ -66,9 +66,9 @@ status-remote: ## Show Supabase DB tier counts
 decay: ## Run thermal decay + snapshot manually (local Docker)
 	DOTENV_CONFIG_PATH=.env python3 scripts/memory-decay.py
 
-decay-remote: ## Run thermal decay against Supabase
+decay-remote: ## Run thermal decay against a managed instance
 	@test -f .env.supabase || (echo "Missing .env.supabase" && exit 1)
-	. ./.env.supabase && DATABASE_URL="$$DATABASE_URL" npx tsx -e "import { decayAll } from './src/thermal.js'; const r = await decayAll(); console.log('Decayed', r.count, 'entities, synced', r.synced); process.exit(0);"
+	DOTENV_CONFIG_PATH=.env.supabase npx tsx scripts/decay-remote.ts
 
 backfill-embeddings: ## Backfill NULL embeddings (local Docker). Add ARGS=--dry-run for a count only
 	npx tsx scripts/backfill-embeddings.ts $(ARGS)
@@ -92,6 +92,24 @@ cron-status: ## Show pg_cron job schedule and recent runs
 	@$(DOCKER_COMPOSE) exec -T postgres psql -U $(PG_USER) -d $(PG_DB) -c \
 		"SELECT jobid, job_pid, status, return_message, start_time FROM cron.job_run_details ORDER BY start_time DESC LIMIT 5;" 2>/dev/null \
 		|| echo "No run history"
+
+cron-status-remote: ## Show pg_cron job schedule and recent runs (managed instance)
+	@DOTENV_CONFIG_PATH=.env.supabase node --import "file://$(PWD)/node_modules/tsx/dist/loader.mjs" --input-type=module -e "\
+import { db } from '$(PWD)/src/db.ts'; import { sql } from 'drizzle-orm';\
+const j = await db.execute(sql\`SELECT jobid, jobname, schedule, active FROM cron.job\`);\
+console.table(j.rows);\
+const r = await db.execute(sql\`SELECT jobid, status, return_message, start_time FROM cron.job_run_details ORDER BY start_time DESC LIMIT 5\`);\
+console.table(r.rows); process.exit(0);"
+
+cron-verify: ## Assert the live decay job matches the committed migration
+	@DOTENV_CONFIG_PATH=.env.supabase node --import "file://$(PWD)/node_modules/tsx/dist/loader.mjs" --input-type=module -e "\
+import { db } from '$(PWD)/src/db.ts'; import { sql } from 'drizzle-orm';\
+const r = await db.execute(sql\`SELECT command FROM cron.job WHERE jobname = 'memory-thermal-decay'\`);\
+if (r.rows.length !== 1) { console.error('FAIL: expected exactly 1 job, got ' + r.rows.length); process.exit(1); }\
+const live = String(r.rows[0].command).replace(/\\s+/g, ' ').trim();\
+const want = 'SELECT public.memory_thermal_decay();';\
+if (live !== want) { console.error('FAIL: live cron command drifted from the committed migration'); console.error('  live: ' + live); console.error('  want: ' + want); process.exit(1); }\
+console.log('OK: live cron job matches the committed migration'); process.exit(0);"
 
 graph: ## Generate Mermaid graph of memory network
 	@$(DOCKER_COMPOSE) exec -T postgres psql -U $(PG_USER) -d $(PG_DB) -t -c \
