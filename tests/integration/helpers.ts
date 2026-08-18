@@ -23,7 +23,7 @@ const { Pool } = pg;
 //   DATABASE_URL=<localhost> DOTENV_CONFIG_PATH=<managed> vitest
 // would satisfy the guard and then write to the managed database anyway.
 // tests/db-guard.test.ts pins this pairing at the source level.
-dotenv.config({ path: process.env.DOTENV_CONFIG_PATH, override: true });
+dotenv.config({ path: process.env.DOTENV_CONFIG_PATH, override: true, quiet: true });
 
 // Guard against running this suite against a shared managed database.
 // Enforced at module load, before the pool is constructed, so it protects

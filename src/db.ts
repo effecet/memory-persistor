@@ -8,7 +8,14 @@ import * as dotenv from 'dotenv';
 // imports) already called `import 'dotenv/config'`, DATABASE_URL from ./.env
 // would otherwise shadow the explicit path here, silently routing all writes
 // to local Docker. Observed 2026-04-07 → 2026-04-13 (6 days of events drift).
-dotenv.config({ path: process.env.DOTENV_CONFIG_PATH, override: true });
+//
+// `quiet: true` is equally load-bearing: dotenv defaults it to FALSE since
+// 17.0.0 and prints its injection banner via console.log — onto stdout, which
+// for the MCP server is the JSON-RPC transport itself. The banner lands ahead
+// of the initialize reply; clients that skip unparseable lines tolerate it,
+// clients that don't see a corrupt stream and register zero tools with no
+// error to read.
+dotenv.config({ path: process.env.DOTENV_CONFIG_PATH, override: true, quiet: true });
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import * as schema from './schema.js';
