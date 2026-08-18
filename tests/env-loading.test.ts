@@ -37,6 +37,51 @@ describe('env loading invariants', () => {
     expect(src).toMatch(/dotenv\.config\([^)]*override:\s*true/);
   });
 
+  it('db.ts must route console.log away from stdout around dotenv.config', () => {
+    // `quiet: true` alone is NOT sufficient. dotenv resolves quiet as
+    //   processEnv.DOTENV_CONFIG_QUIET || options.quiet
+    // at lib/main.js:248, and RE-READS it after populate at :292 — so the env
+    // var wins over the code option, and parseBoolean('false') === false. A
+    // DOTENV_CONFIG_QUIET=false in the shell OR inside the .env file itself
+    // puts the banner back on stdout, which is the MCP JSON-RPC transport.
+    // The console.log swap makes that unreachable regardless of resolution.
+    const src = readFileSync(join(repoRoot, 'src/db.ts'), 'utf8');
+    expect(src).toMatch(/console\.log\s*=/);
+  });
+
+  it('the console.log swap survives DOTENV_CONFIG_QUIET=false', () => {
+    // Behavioural proof of the technique, independent of db.ts. Guards against
+    // a future dotenv release changing how quiet resolves.
+    const tmp = mkdtempSync(join(tmpdir(), 'env-quiet-'));
+    const envFile = join(tmp, 'noisy.env');
+    writeFileSync(envFile, 'QUIET_PROBE=1\n');
+
+    const prevVar = process.env.DOTENV_CONFIG_QUIET;
+    process.env.DOTENV_CONFIG_QUIET = 'false'; // hostile: defeats { quiet: true }
+
+    const realLog = console.log;
+    const stdoutLines: string[] = [];
+    console.log = (...args: unknown[]) => {
+      stdoutLines.push(args.join(' '));
+    };
+    let banner: string[] = [];
+    try {
+      // Confirm the hostile env var really does re-enable logging...
+      dotenv.config({ path: envFile, override: true, quiet: true });
+      banner = [...stdoutLines];
+    } finally {
+      console.log = realLog;
+      if (prevVar === undefined) delete process.env.DOTENV_CONFIG_QUIET;
+      else process.env.DOTENV_CONFIG_QUIET = prevVar;
+    }
+
+    // ...so the swap is load-bearing, not redundant. If this ever goes empty,
+    // dotenv changed its precedence and the swap may no longer be needed —
+    // verify before removing it.
+    expect(banner.length).toBeGreaterThan(0);
+    expect(banner.join('\n')).toMatch(/injected env/i);
+  });
+
   it('db.ts must pass { quiet: true } — stdout is the MCP transport', () => {
     // dotenv defaults quiet:false since 17.0.0 and logs its injection banner
     // with console.log — i.e. onto stdout, which for the MCP server IS the

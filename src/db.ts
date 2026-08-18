@@ -15,7 +15,24 @@ import * as dotenv from 'dotenv';
 // of the initialize reply; clients that skip unparseable lines tolerate it,
 // clients that don't see a corrupt stream and register zero tools with no
 // error to read.
-dotenv.config({ path: process.env.DOTENV_CONFIG_PATH, override: true, quiet: true });
+//
+// The console.log swap is NOT belt-and-braces — `quiet: true` alone is
+// defeatable. dotenv resolves it as
+//     processEnv.DOTENV_CONFIG_QUIET || options.quiet          (lib/main.js:248)
+// and RE-READS it from processEnv after populate                (lib/main.js:292),
+// so the environment variable outranks the code option, and parseBoolean('false')
+// is false. A stray DOTENV_CONFIG_QUIET=false — in the shell, in the MCP server's
+// env block, or inside the .env file this very call is loading — silently puts the
+// banner back on stdout. Routing console.log to stderr for the duration makes that
+// unreachable however `quiet` resolves, and also catches anything else that decides
+// to log during env loading. Restored in `finally` so nothing leaks past this line.
+const __realLog = console.log;
+console.log = (...args: unknown[]) => console.error(...args);
+try {
+  dotenv.config({ path: process.env.DOTENV_CONFIG_PATH, override: true, quiet: true });
+} finally {
+  console.log = __realLog;
+}
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import * as schema from './schema.js';
