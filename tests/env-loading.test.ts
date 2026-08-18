@@ -37,6 +37,15 @@ describe('env loading invariants', () => {
     expect(src).toMatch(/dotenv\.config\([^)]*override:\s*true/);
   });
 
+  it('db.ts must pass { quiet: true } — stdout is the MCP transport', () => {
+    // dotenv defaults quiet:false since 17.0.0 and logs its injection banner
+    // with console.log — i.e. onto stdout, which for the MCP server IS the
+    // JSON-RPC transport. A client that does not skip unparseable lines sees
+    // a corrupt stream and registers no tools, with no error to read.
+    const src = readFileSync(join(repoRoot, 'src/db.ts'), 'utf8');
+    expect(src).toMatch(/dotenv\.config\([^)]*quiet:\s*true/);
+  });
+
   it('dotenv { override: true } overrides a pre-set env var', () => {
     // Guard against dotenv upgrade silently changing override semantics.
     const tmp = mkdtempSync(join(tmpdir(), 'env-test-'));

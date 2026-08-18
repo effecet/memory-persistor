@@ -194,7 +194,7 @@ describe('helpers.ts resolves DATABASE_URL the same way src/db.ts does', () => {
 
   it('helpers.ts overrides from DOTENV_CONFIG_PATH, like db.ts', () => {
     expect(read('./integration/helpers.ts')).toMatch(
-      /dotenv\.config\(\{\s*path:\s*process\.env\.DOTENV_CONFIG_PATH,\s*override:\s*true\s*\}\)/,
+      /dotenv\.config\(\{\s*path:\s*process\.env\.DOTENV_CONFIG_PATH,\s*override:\s*true,\s*quiet:\s*true\s*\}\)/,
     );
   });
 
@@ -209,7 +209,7 @@ describe('helpers.ts resolves DATABASE_URL the same way src/db.ts does', () => {
     // If db.ts ever changes its resolution, this pairing is stale and the two
     // pools can diverge again — fail here rather than against a live database.
     expect(read('../src/db.ts')).toMatch(
-      /dotenv\.config\(\{\s*path:\s*process\.env\.DOTENV_CONFIG_PATH,\s*override:\s*true\s*\}\)/,
+      /dotenv\.config\(\{\s*path:\s*process\.env\.DOTENV_CONFIG_PATH,\s*override:\s*true,\s*quiet:\s*true\s*\}\)/,
     );
   });
 });
