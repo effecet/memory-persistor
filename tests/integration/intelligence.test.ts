@@ -1,5 +1,5 @@
 /**
- * Integration tests for Phase 4: Memory Intelligence.
+ * Integration tests for memory intelligence.
  * Tests: version history, merge, conflicts, dedup detection.
  */
 import { describe, it, expect, afterAll, afterEach } from 'vitest';
@@ -148,6 +148,40 @@ describe('mergeMemories', () => {
     createdIds.splice(createdIds.indexOf(source.id), 1);
   });
 
+  it('invalidates a stale target embedding after merge (embed disabled in this test env)', async () => {
+    // EMBED_ON_WRITE_ENABLED is a config.ts constant fixed at process start
+    // from MEMORY_EMBED_ENABLED — this suite doesn't set it, so it's false
+    // here (verified: neither .env nor .env.supabase define it). That means
+    // mergeMemories should invalidate rather than recompute — exercising the
+    // "disabled machine" branch of the shared resolveEmbeddingForTextChange
+    // policy (the "preserve on transient failure" branch is covered directly
+    // in tests/embed-write-failure.test.ts).
+    const target = await insertTestMemory({
+      name: 'merge-embed-target',
+      observations: 'target content',
+    });
+    const source = await insertTestMemory({
+      name: 'merge-embed-source',
+      observations: 'source content',
+    });
+    createdIds.push(target.id, source.id);
+
+    // Simulate a pre-existing embedding on the target, as if a dev machine
+    // had embedded it before this merge. Merge must invalidate this — leaving
+    // it in place would silently describe only the pre-merge text.
+    const fakeVector = new Array(384).fill(0.01);
+    await testDb.update(entities).set({ embedding: fakeVector }).where(eq(entities.id, target.id));
+
+    const result = await mergeMemories(source.id, target.id);
+    createdIds.splice(createdIds.indexOf(source.id), 1);
+
+    expect(result.mergedFields).toContain('embedding');
+
+    const merged = await getMemory(target.id);
+    expect(merged).not.toBeNull();
+    expect(merged!.embedding).toBeNull();
+  });
+
   it('unions tags and keeps higher importance', async () => {
     const target = await insertTestMemory({
       name: 'merge-tags-target',
@@ -232,8 +266,8 @@ describe('mergeMemories', () => {
         observations: m.observations as string, source: m.source as string,
         temperature: 0.5, tier: 'WARM',
       });
-      syncToFile(toEntity(srcMem));
-      syncToFile(toEntity(tgtMem));
+      await syncToFile(toEntity(srcMem));
+      await syncToFile(toEntity(tgtMem));
 
       const srcPath = join(memDir, 'fact_merge-orphan-source.md');
       const tgtPath = join(memDir, 'fact_merge-orphan-target.md');
@@ -243,7 +277,7 @@ describe('mergeMemories', () => {
       const srcSnapshot = toEntity(srcMem);
       await mergeMemories(srcMem.id, tgtMem.id);
       const current = await getMemory(tgtMem.id);
-      syncMerge(srcSnapshot, {
+      await syncMerge(srcSnapshot, {
         id: current!.id, name: current!.name, type: current!.type,
         observations: current!.observations as string, source: current!.source as string,
         temperature: 0.5, tier: 'WARM',
@@ -251,9 +285,18 @@ describe('mergeMemories', () => {
 
       expect(existsSync(srcPath)).toBe(false);
       expect(existsSync(tgtPath)).toBe(true);
+      // Index line format is `- <type>: <name> — <desc>`, so the
+      // old slug assertions ('merge-orphan-source'/'-target') no longer match
+      // anything and passed/failed for the wrong reasons. Asserting on the bare
+      // name is also unsafe here: the merged target's description embeds a
+      // "[Merged from: merge orphan source]" note, and whether the word "source"
+      // survives depends purely on where the 40-char truncation lands.
+      // Assert the structure instead — memDir is isolated to these two memories,
+      // so after the merge there must be exactly one bullet, the target's.
       const index = readFileSync(join(memDir, 'MEMORY.md'), 'utf-8');
-      expect(index).not.toContain('merge-orphan-source');
-      expect(index).toContain('merge-orphan-target');
+      const bullets = index.split('\n').filter((l) => l.startsWith('- '));
+      expect(bullets).toHaveLength(1);
+      expect(bullets[0]).toMatch(/^- fact: merge orphan target — /);
 
       // Source is gone from PG (mergeMemories deleted it) — drop from cleanup list.
       createdIds.splice(createdIds.indexOf(srcMem.id), 1);

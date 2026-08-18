@@ -19,6 +19,14 @@ jobs:
       - name: Build
         run: npm run build
 
+      # transformers.js caches the model under
+      # node_modules/@huggingface/transformers/.cache, which `npm ci` wipes every
+      # run — so a fresh runner has no model. The embed tests set
+      # env.allowRemoteModels=false (offline by design), so without this step they
+      # fail with `local_files_only=true ... file was not found locally`.
+      - name: Pre-cache embedding model (bge-small, fp32)
+        run: node --import tsx scripts/precache-embed-model.ts
+
       - name: Unit tests (Vitest)
         run: npx vitest run --exclude 'tests/integration/**'
 

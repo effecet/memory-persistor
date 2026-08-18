@@ -25,9 +25,21 @@ rebuild: ## Force rebuild Postgres image (after Dockerfile changes)
 	@echo "Waiting for Postgres to be ready..."
 	@$(DOCKER_COMPOSE) exec postgres pg_isready -U $(PG_USER) -d $(PG_DB) --timeout=30
 
-migrate: ## Run Drizzle migrations (generate + migrate)
-	npx drizzle-kit generate
-	npx drizzle-kit migrate
+# Applies the hand-written SQL in drizzle/ IN ORDER, via psql.
+#
+# This deliberately does NOT run `drizzle-kit generate`. `drizzle/meta/` is
+# gitignored, so the generator has no snapshot history and emits a from-scratch
+# schema — correct against an empty database, destructive against a populated
+# one. Every file in drizzle/ is hand-written and individually idempotent
+# (IF NOT EXISTS / CREATE OR REPLACE / DROP+CREATE), so replaying them all is
+# safe and is what makes this target re-runnable.
+migrate: ## Apply the hand-written SQL migrations in order (local Docker)
+	@set -e; for f in drizzle/0*.sql; do \
+		echo "→ $$f"; \
+		$(DOCKER_COMPOSE) exec -T postgres psql -U $(PG_USER) -d $(PG_DB) \
+			-v ON_ERROR_STOP=1 -q -f - < "$$f"; \
+	done
+	@echo "migrations applied"
 
 seed: ## Seed memories from $CLAUDE_DIR/projects/*/memory/ (optional file-sync)
 	npx tsx src/import.ts
@@ -66,9 +78,9 @@ status-remote: ## Show Supabase DB tier counts
 decay: ## Run thermal decay + snapshot manually (local Docker)
 	DOTENV_CONFIG_PATH=.env python3 scripts/memory-decay.py
 
-decay-remote: ## Run thermal decay against Supabase
+decay-remote: ## Run thermal decay against a managed instance
 	@test -f .env.supabase || (echo "Missing .env.supabase" && exit 1)
-	. ./.env.supabase && DATABASE_URL="$$DATABASE_URL" npx tsx -e "import { decayAll } from './src/thermal.js'; const r = await decayAll(); console.log('Decayed', r.count, 'entities, synced', r.synced); process.exit(0);"
+	DOTENV_CONFIG_PATH=.env.supabase npx tsx scripts/decay-remote.ts
 
 backfill-embeddings: ## Backfill NULL embeddings (local Docker). Add ARGS=--dry-run for a count only
 	npx tsx scripts/backfill-embeddings.ts $(ARGS)
@@ -92,6 +104,24 @@ cron-status: ## Show pg_cron job schedule and recent runs
 	@$(DOCKER_COMPOSE) exec -T postgres psql -U $(PG_USER) -d $(PG_DB) -c \
 		"SELECT jobid, job_pid, status, return_message, start_time FROM cron.job_run_details ORDER BY start_time DESC LIMIT 5;" 2>/dev/null \
 		|| echo "No run history"
+
+cron-status-remote: ## Show pg_cron job schedule and recent runs (managed instance)
+	@DOTENV_CONFIG_PATH=.env.supabase node --import "file://$(PWD)/node_modules/tsx/dist/loader.mjs" --input-type=module -e "\
+import { db } from '$(PWD)/src/db.ts'; import { sql } from 'drizzle-orm';\
+const j = await db.execute(sql\`SELECT jobid, jobname, schedule, active FROM cron.job\`);\
+console.table(j.rows);\
+const r = await db.execute(sql\`SELECT jobid, status, return_message, start_time FROM cron.job_run_details ORDER BY start_time DESC LIMIT 5\`);\
+console.table(r.rows); process.exit(0);"
+
+cron-verify: ## Assert the live decay job matches the committed migration
+	@DOTENV_CONFIG_PATH=.env.supabase node --import "file://$(PWD)/node_modules/tsx/dist/loader.mjs" --input-type=module -e "\
+import { db } from '$(PWD)/src/db.ts'; import { sql } from 'drizzle-orm';\
+const r = await db.execute(sql\`SELECT command FROM cron.job WHERE jobname = 'memory-thermal-decay'\`);\
+if (r.rows.length !== 1) { console.error('FAIL: expected exactly 1 job, got ' + r.rows.length); process.exit(1); }\
+const live = String(r.rows[0].command).replace(/\\s+/g, ' ').trim();\
+const want = 'SELECT public.memory_thermal_decay();';\
+if (live !== want) { console.error('FAIL: live cron command drifted from the committed migration'); console.error('  live: ' + live); console.error('  want: ' + want); process.exit(1); }\
+console.log('OK: live cron job matches the committed migration'); process.exit(0);"
 
 graph: ## Generate Mermaid graph of memory network
 	@$(DOCKER_COMPOSE) exec -T postgres psql -U $(PG_USER) -d $(PG_DB) -t -c \

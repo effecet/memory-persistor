@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { toSummary, applyResponseCap, type RecallResult } from '../src/retrieve.js';
-import { RESPONSE_CAP_BYTES } from '../src/config.js';
+import { RESPONSE_CAP_BYTES, SUMMARY_RELATED_CAP } from '../src/config.js';
+
+/** N distinct neighbour stubs, in stable order, for cap assertions. */
+function makeRelated(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `rel-${i}`,
+    name: `neighbour-${i}`,
+    relation_type: 'related_to',
+  }));
+}
 
 function makeRow(id: string, obsLen: number): RecallResult {
   return {
@@ -33,6 +42,62 @@ describe('toSummary', () => {
     const row = makeRow('a', 10);
     row.related = [{ id: 'b', name: 'n', relation_type: 'related_to' }];
     expect(toSummary(row).related).toHaveLength(1);
+  });
+
+  it('leaves an under-cap related[] untouched and sets no related_total', () => {
+    const row = makeRow('a', 10);
+    row.related = makeRelated(SUMMARY_RELATED_CAP);
+    const s = toSummary(row);
+    expect(s.related).toHaveLength(SUMMARY_RELATED_CAP);
+    expect(s.related_total).toBeUndefined();
+  });
+
+  it('caps an over-cap related[] and reports the true total', () => {
+    // A hub with 218 edges against a ~4 average: summary mode
+    // previously copied all 218, so the "lean" projection cost nearly as much
+    // as full mode on exactly the rows that surface most often.
+    const row = makeRow('a', 10);
+    row.related = makeRelated(218);
+    const s = toSummary(row);
+    expect(s.related).toHaveLength(SUMMARY_RELATED_CAP);
+    expect(s.related_total).toBe(218);
+    expect(s.related?.[0].id).toBe('rel-0'); // keeps the first N, stable order
+  });
+
+  it('omits related and related_total entirely when there are no edges', () => {
+    const row = makeRow('a', 10);
+    const s = toSummary(row);
+    expect(s.related).toBeUndefined();
+    expect(s.related_total).toBeUndefined();
+  });
+
+  it('treats an empty related[] as absent, not as a truncation', () => {
+    const row = makeRow('a', 10);
+    row.related = [];
+    const s = toSummary(row);
+    expect(s.related).toBeUndefined();
+    expect(s.related_total).toBeUndefined();
+  });
+
+  it('materially shrinks a hub row versus the uncapped projection', () => {
+    const row = makeRow('a', 10);
+    row.related = makeRelated(218);
+    const capped = Buffer.byteLength(JSON.stringify(toSummary(row)), 'utf8');
+    const uncapped = Buffer.byteLength(
+      JSON.stringify({ ...toSummary(row), related: row.related }),
+      'utf8',
+    );
+    expect(capped).toBeLessThan(uncapped * 0.15);
+  });
+});
+
+describe('full mode is unaffected by the summary cap', () => {
+  it('keeps every related entry when output_mode is full', () => {
+    const row = makeRow('a', 10);
+    row.related = makeRelated(218);
+    const r = applyResponseCap([row], 'full');
+    expect(r.kept).toHaveLength(1);
+    expect((r.kept[0] as RecallResult).related).toHaveLength(218);
   });
 });
 

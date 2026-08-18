@@ -41,7 +41,7 @@ Docker container.
 # Local Docker (easiest to try)
 cp .env.example .env          # configure credentials
 make up                       # start Postgres + pg_cron (Docker)
-make migrate                  # run Drizzle schema migrations
+make migrate                  # apply the hand-written SQL migrations (psql)
 make dev                      # start the MCP server
 
 # Managed Postgres (e.g. Supabase)
@@ -56,8 +56,8 @@ The server exposes these tools to an MCP client:
 | Tool | Purpose |
 |------|---------|
 | `remember` | Store a memory with tags, type, importance — auto-relates to top-3 FTS matches, dedup-checks |
-| `recall` | 9-signal hybrid search (FTS + trigram + **semantic vector** + temperature + importance + graph centrality + recency + access frequency) |
-| `recall_by_ids` | Fetch full bodies for specific ids (no search) — drill-down after a capped recall |
+| `recall` | 9-signal hybrid search (FTS + trigram + **semantic vector** + temperature + importance + graph centrality + recency + access frequency). `output_mode: "summary"` returns lean triage rows — no observations body, and at most 5 `related` edges with `related_total` when truncated |
+| `recall_by_ids` | Fetch full bodies for specific ids (no search) — drill-down after a capped or summary recall |
 | `forget` | Delete a memory, cascade its relations, remove the synced markdown file |
 | `update` | Partial update with automatic version snapshot before changes |
 | `relate` | Create typed edges: `related_to`, `supersedes`, `contradicts`, `elaborates`, `depends_on` |
@@ -102,11 +102,12 @@ graph TD
     subgraph DB["PostgreSQL 17 + pg_trgm + pgvector + pg_cron"]
         PG[(Entities + embedding<br/>+ Relations + Versions + Events)]
         PQ[(Pending)]
-        CRON[pg_cron<br/>Nightly decay]
+        CRON["pg_cron<br/>memory_thermal_decay()<br/>drizzle/0010"]
     end
 
     subgraph Sync["Optional"]
         FS[file-sync.ts<br/>mirror memories to markdown]
+        IDX[MEMORY.md index<br/>170-line budget<br/>ranked on live thermal state]
         CAN[events_canary.py<br/>event-freshness check]
     end
 
@@ -115,6 +116,9 @@ graph TD
     INT --> PG
     OBS --> PG
     SERVER --> FS
+    FS --> IDX
+    PG -.->|batched pg_id &rarr; tier, temp| IDX
+    CRON --> PG
     SERVER --> PEND
     PEND --> PQ
     CAN -.->|polls events<br/>alert on silence| PG
@@ -207,12 +211,68 @@ reversible.
 1. **PostgreSQL** — primary store (entities, relations, versions, events, pending)
 2. **Markdown files** *(optional)* — `file-sync.ts` mirrors memories to a directory of `.md` files (set `MEMORY_PERSISTOR_DIR` / `CLAUDE_DIR`), handy for agents with a file-based memory convention. The index it maintains lists one line per memory as `- <type>: <name> — <description>`.
 
+#### Index budget
+
+An auto-loaded index file is only useful if an agent can afford to read it, so
+the index is bounded at **170 lines**. Under budget, every memory is listed.
+Over it, entries are ranked and the overflow is replaced by a
+`- …and N more — use \`recall\`` footer — the dropped memories are still fully
+searchable, just not pre-loaded.
+
+Retention order when the budget bites:
+
+1. `user` and `feedback` entries first — standing instructions and identity
+2. then tier: `HOT` > `WARM` > `COLD` (an unknown tier sorts as `WARM`, never dropped blind)
+3. then temperature, descending
+4. then filename, in **codepoint** order (not `localeCompare`, which disagrees with the display sort)
+
+Step 1 is a priority tier, not an exemption: if protected entries alone exceeded
+the budget they would still be cut among themselves, so the file cannot breach.
+
+Temperature and tier come from **Postgres at emit time**, keyed by each file's
+`pg_id` — one batched lookup per rebuild, never one per file. Frontmatter is only
+rewritten when that memory is written, so ranking on it would go stale between
+decays and degrade to roughly alphabetical. Two contract details follow from
+that: if the database is unreachable the **whole** index falls back to
+frontmatter ranking (never a mix of fresh and stale values), while a `pg_id` that
+the database does not know is an **orphan** and ranks at temperature 0, so it can
+never outrank a live memory.
+
 ### pg_cron Jobs
 
 | Job | Schedule | Purpose |
 |-----|----------|---------|
 | `memory-thermal-decay` | `0 6 * * *` UTC | Nightly pattern-aware decay + importance drift + stale flagging |
 | `memory-decay-startup-catchup` | `@reboot` (local Docker) | Runs `decay_catchup()` on container start if last decay was >24h ago |
+
+The decay contract is version-controlled in
+`drizzle/0010_thermal_decay_function.sql`, which creates
+`public.memory_thermal_decay()` and points the schedule at it. Keeping it in a
+migration rather than only as a live `cron.job` row is what makes it reviewable
+and reproducible — `make cron-verify` asserts the live job still matches the
+committed migration, and `tests/test_thermal_decay_migration.py` fails if a
+constant in `src/config.ts` moves without the SQL.
+
+> **Local Docker has two other inline copies of the decay SQL.**
+> `initdb/01-pg-cron.sql` runs at container init, *before* any migration, so it
+> seeds `memory-thermal-decay` with its own inline CTE; applying `0010`
+> afterwards unschedules and replaces it, so the function wins on any container
+> where migrations ran. Its `decay_catchup()` (`@reboot` catch-up) keeps a
+> separate inline copy that `0010` does **not** replace. If you change the decay
+> maths, change `initdb/01-pg-cron.sql` too — the migration guard does not cover
+> it. A managed instance is unaffected: it never runs `initdb/`.
+
+`decayAll()` in `src/thermal.ts` calls that same function and then does the
+markdown half, which SQL structurally cannot: Postgres has no access to any
+machine's filesystem, which is exactly why the scheduled path alone leaves
+frontmatter stale. Run `make decay-remote` on a machine that has the memory
+directory to reconcile it.
+
+The function is **plpgsql, not a single statement**, deliberately: the decay pass
+and the stale-flag pass must be separate statements, or the stale pass would
+share a snapshot and not see the tiers the decay pass just wrote. Its
+`cron.schedule` call is guarded on the `cron` schema existing, so the migration
+still applies to ephemeral test databases that have no pg_cron.
 
 ## Development
 
@@ -225,13 +285,24 @@ make decay             # run thermal decay (local)
 make backfill-embeddings  # embed any rows with a NULL embedding (ARGS=--dry-run to count)
 make canary            # events-pipeline freshness check (local)
 make cron-status       # pg_cron schedule and recent runs
+make cron-verify       # assert the live decay job matches the committed migration
 make graph             # Mermaid graph of memory network
 make seed              # import existing markdown memories (optional file-sync)
 make clean             # remove volumes and generated files
 ```
 
 Each command has a `-remote` variant (`dev-remote`, `status-remote`, `decay-remote`,
-`canary-remote`) that targets the connection in `.env.supabase`.
+`canary-remote`, `cron-status-remote`) that targets the connection in `.env.supabase`.
+
+> **`make test-integration` refuses a non-local database.** The suite issues
+> unconditional, table-wide `DELETE`s, so `tests/integration/db-guard.ts` requires
+> `DATABASE_URL` to point at localhost. A CI job whose Postgres is a *service
+> container* (reachable by service name, not localhost) can opt in with
+> `ALLOW_NONLOCAL_INTEGRATION_DB=1`. That opt-in is deliberately **not** wired to
+> `CI=true` — plenty of local tooling exports that, and treating it as consent
+> would silently disarm the guard on a developer machine. Managed hosts
+> (`supabase.com` / `supabase.co` / any `pooler`) are on an unconditional denylist
+> that no opt-in lifts.
 
 ### Project Structure
 
@@ -256,6 +327,8 @@ scripts/
   events_canary.py           # Event-freshness check (exits 1 if pipeline silent)
   backfill-edges.ts          # One-time auto-relate backfill
   backfill-embeddings.ts     # One-time embedding backfill for NULL rows
+  decay-remote.ts            # Manual decay pass (SQL half + the markdown half)
+  precache-embed-model.ts    # CI helper: warm the bge-small model cache
 tests/
   *.test.ts           # Unit tests (Vitest)
   *.py                # Python tests (pytest)

@@ -22,7 +22,7 @@
  */
 import { db } from './db.js';
 import { sql, type SQL } from 'drizzle-orm';
-import { SCORING_WEIGHTS, DEFAULT_RECALL_LIMIT, TRIGRAM_THRESHOLD, SEMANTIC_WHERE_THRESHOLD, RESPONSE_CAP_BYTES } from './config.js';
+import { SCORING_WEIGHTS, DEFAULT_RECALL_LIMIT, TRIGRAM_THRESHOLD, SEMANTIC_WHERE_THRESHOLD, RESPONSE_CAP_BYTES, SUMMARY_RELATED_CAP } from './config.js';
 import { bump } from './thermal.js';
 import { truncateDescription } from './file-sync.js';
 import { embedForQuery, toPgVector } from './embed.js';
@@ -38,12 +38,12 @@ export interface RecallOptions {
    * Internal only — not exposed via the public `recall` MCP tool schema. Skips
    * embedForQuery() entirely (semantic term is always 0, no WHERE widening).
    * Used by remember's auto-relate call: it already computed a write-path
-   * vector for the SAME text via embedForWrite — a second embedForQuery call
-   * here would be pure redundant inference. It would also defeat the whole
-   * point of `EMBED_ON_WRITE_ENABLED` dev-only-embed: a write-disabled machine
-   * would otherwise still load the ONNX runtime on every `remember`, not just
-   * on an explicit `recall` — the one call site query-time embedding was
-   * ungated for.
+   * vector for the SAME text via embedForWrite — a second
+   * embedForQuery call here would be pure redundant inference. It would also
+   * defeat the whole point of `EMBED_ON_WRITE_ENABLED` dev-only-embed: a
+   * write-disabled machine that never writes vectors would otherwise still
+   * load the ONNX runtime on every `remember`, not just on an explicit
+   * `recall` — the one call site query-time embedding was ungated for.
    */
   skipSemantic?: boolean;
 }
@@ -84,6 +84,8 @@ export interface RecallSummary {
   tags: string[];
   score: number;
   related?: RelatedEntity[];
+  /** True neighbour count, present ONLY when `related` was capped. */
+  related_total?: number;
 }
 
 /** Project a full result down to the lean triage shape (excerpt derived at read time). */
@@ -96,7 +98,15 @@ export function toSummary(r: RecallResult): RecallSummary {
     tags: r.tags,
     score: r.score,
   };
-  if (r.related) summary.related = r.related;
+  // Cap the edge list: without this, summary strips the observations body but
+  // still copies every neighbour, so a hub row costs nearly as much as full
+  // mode — the opposite of what a triage projection is for. `related_total`
+  // appears only when truncated, so a caller can tell 5 neighbours from 5 of
+  // 200 and reach for `traverse` when the difference matters.
+  if (r.related?.length) {
+    summary.related = r.related.slice(0, SUMMARY_RELATED_CAP);
+    if (r.related.length > SUMMARY_RELATED_CAP) summary.related_total = r.related.length;
+  }
   return summary;
 }
 

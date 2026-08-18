@@ -7,6 +7,7 @@ import pg from 'pg';
 import { eq, sql } from 'drizzle-orm';
 import { entities, memoryRelations } from '../../src/schema.js';
 import * as schema from '../../src/schema.js';
+import { EMBED_DIMS } from '../../src/config.js';
 import * as dotenv from 'dotenv';
 import { assertSafeIntegrationTarget } from './db-guard.js';
 
@@ -57,6 +58,7 @@ export async function insertTestMemory(overrides: Partial<{
   temperature: number;
   tier: string;
   accessCount: number;
+  embedding: number[] | null;
 }> = {}) {
   const [entity] = await testDb
     .insert(entities)
@@ -70,10 +72,25 @@ export async function insertTestMemory(overrides: Partial<{
       temperature: overrides.temperature ?? 1.0,
       tier: overrides.tier ?? 'HOT',
       accessCount: overrides.accessCount ?? 0,
+      embedding: overrides.embedding ?? null,
     })
     .returning();
 
   return entity;
+}
+
+/**
+ * Deterministic 384-d L2-unit "basis" embedding for cosine-dedup tests: a
+ * one-hot vector at `index % EMBED_DIMS`. Same index → cosine 1.0 (a near-dupe
+ * pair); distinct indices → cosine 0 (no pair). Lets the health cosine-dedup
+ * tests control which pairs cross DEDUP_COSINE_THRESHOLD without loading the
+ * embedding model — the model's own semantic behavior is proven separately in
+ * dedup-cosine.test.ts / recall-semantic.test.ts.
+ */
+export function basisEmbedding(index: number): number[] {
+  const v = new Array<number>(EMBED_DIMS).fill(0);
+  v[((index % EMBED_DIMS) + EMBED_DIMS) % EMBED_DIMS] = 1;
+  return v;
 }
 
 /**

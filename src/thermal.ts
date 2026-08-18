@@ -16,9 +16,6 @@ import { eq, sql } from 'drizzle-orm';
 import {
   BUMP_AMOUNT,
   CASCADE_FACTOR,
-  DECAY_RATE,
-  DECAY_THRESHOLD_HOURS,
-  STALE_THRESHOLD_DAYS,
   TIER_HOT,
   TIER_WARM,
   PATTERN_THRESHOLD_BITS,
@@ -146,48 +143,35 @@ export async function bump(id: string): Promise<void> {
  * Syncs updated temperature/tier to markdown files.
  */
 export async function decayAll(): Promise<{ count: number; synced: number }> {
-  // Use a CTE to pre-compute the effective decay rate per entity.
-  // bit_count returns bigint, so cast to real for float arithmetic.
-  const result = await db.execute(sql`
-    WITH decay_rates AS (
-      SELECT
-        e.id,
-        CASE
-          WHEN bit_count(COALESCE(e.access_bitmap, 0)::bit(7))::real >= ${PATTERN_THRESHOLD_BITS}::real
-          THEN LEAST(1.0::real, ${DECAY_RATE}::real + (1.0::real - ${DECAY_RATE}::real) * (
-            ${PATTERN_MULTIPLIER_BASE}::real - 1.0::real
-            + (bit_count(COALESCE(e.access_bitmap, 0)::bit(7))::real - ${PATTERN_THRESHOLD_BITS}::real)
-              * ${PATTERN_MULTIPLIER_PER_BIT}::real
-          ))
-          ELSE ${DECAY_RATE}::real
-        END AS effective_rate
-      FROM public.entities e
-      WHERE e.last_accessed_at < NOW() - (INTERVAL '1 hour' * ${DECAY_THRESHOLD_HOURS})
-    )
-    UPDATE public.entities e
-    SET
-      temperature = GREATEST(0.0, e.temperature * dr.effective_rate),
-      tier = CASE
-        WHEN GREATEST(0.0, e.temperature * dr.effective_rate) > ${TIER_HOT} THEN 'HOT'
-        WHEN GREATEST(0.0, e.temperature * dr.effective_rate) > ${TIER_WARM} THEN 'WARM'
-        ELSE 'COLD'
-      END,
-      importance = CASE
-        WHEN e.access_count >= ${IMPORTANCE_DRIFT_ACCESS_MIN}
-          THEN LEAST(${IMPORTANCE_CAP}::real, e.importance + ${IMPORTANCE_DRIFT_UP}::real)
-        WHEN e.last_accessed_at < NOW() - (INTERVAL '1 day' * ${IMPORTANCE_DRIFT_NEGLECT_DAYS})
-          THEN GREATEST(${IMPORTANCE_FLOOR}::real, e.importance - ${IMPORTANCE_DRIFT_DOWN}::real)
-        ELSE e.importance
-      END
-    FROM decay_rates dr
-    WHERE e.id = dr.id
-    RETURNING e.id, e.name, e.type, e.observations, e.temperature, e.tier, e.source, e.importance, e.access_count
-  `);
+  // The decay contract this path uses lives in drizzle/0010_thermal_decay_function.sql,
+  // pinned against src/config.ts by tests/test_thermal_decay_migration.py. It used to
+  // be duplicated here as an inline CTE as well. (initdb/01-pg-cron.sql still carries
+  // its own inline copies for local-Docker bootstrap and decay_catchup — see the
+  // migration header.)
+  //
+  // TypeScript keeps only the file-sync half below, which SQL structurally cannot
+  // own: Postgres has no access to any machine's filesystem, which is exactly why
+  // the scheduled pg_cron path leaves markdown frontmatter stale.
+  const result = await db.execute(sql`SELECT * FROM public.memory_thermal_decay()`);
+
+  const rows = result.rows as any[];
+
+  // Rank the index once per directory, on the LAST write into that directory.
+  // Earlier writes to the same dir skip the thermal lookup entirely (null); the
+  // final one fetches (undefined) and therefore sees every file in the dir,
+  // decayed or not.
+  //
+  // Passing a map built from `rows` instead would be wrong: it covers only the
+  // entities that decayed, so every non-decayed neighbour in the same directory
+  // would resolve as an orphan and be ranked at temperature 0 — a single decay
+  // run would evict them all from the index.
+  const lastIndexInDir = new Map<string, number>();
+  rows.forEach((row, i) => lastIndexInDir.set(String(row.source), i));
 
   let synced = 0;
-  for (const row of result.rows as any[]) {
+  for (const [i, row] of rows.entries()) {
     try {
-      syncToFile({
+      await syncToFile({
         id: row.id,
         name: row.name,
         type: row.type,
@@ -197,21 +181,20 @@ export async function decayAll(): Promise<{ count: number; synced: number }> {
         source: row.source,
         importance: row.importance ?? 0.5,
         accessCount: row.access_count ?? 0,
-      });
+        // Round-trip origin_host. Before the function returned it, every decayed
+        // file had its real origin_host overwritten with `unknown`, nightly.
+        originHost: row.origin_host ?? undefined,
+      }, lastIndexInDir.get(String(row.source)) === i ? undefined : null);
       synced++;
     } catch {
       // Non-fatal: Postgres is the source of truth
     }
   }
 
-  // Flag memories COLD for 30+ days as stale
-  await db.execute(sql`
-    UPDATE public.entities
-    SET stale = true
-    WHERE tier = 'COLD'
-      AND last_accessed_at < NOW() - (INTERVAL '1 day' * ${STALE_THRESHOLD_DAYS})
-      AND stale = false
-  `);
+  // The stale-flag pass is NOT repeated here: memory_thermal_decay() already
+  // runs it as its second statement, after the decay pass, so it sees the tiers
+  // that pass just wrote. Re-running it would be a second copy of the same
+  // contract — the exact duplication this refactor removed.
 
   return { count: result.rows.length, synced };
 }

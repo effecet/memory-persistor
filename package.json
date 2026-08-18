@@ -8,7 +8,7 @@
     "build": "tsc",
     "test": "vitest run --exclude 'tests/integration/**'",
     "test:integration": "vitest run tests/integration/ --fileParallelism=false",
-    "migrate": "drizzle-kit generate && drizzle-kit migrate",
+    "migrate": "echo \"Use: make migrate (applies drizzle/*.sql via psql). drizzle-kit generate is destructive here - drizzle/meta/ is gitignored.\" && exit 1",
     "seed": "tsx src/import.ts"
   },
   "repository": {

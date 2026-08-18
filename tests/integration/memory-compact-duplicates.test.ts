@@ -9,6 +9,7 @@ import { eq } from 'drizzle-orm';
 import {
   testDb,
   insertTestMemory,
+  basisEmbedding,
   cleanupMemories,
   closeTestDb,
   getMemory,
@@ -30,22 +31,26 @@ afterAll(async () => {
 });
 
 /**
- * Seed a pair of near-duplicates that appear in dedupCandidates. The shorter
- * observation is a clean prefix of the longer, so bidirectional similarity
- * is comfortably above the 0.85 threshold regardless of UUID ordering.
+ * Seed a pair of near-duplicates that appear in dedupCandidates. Both rows get
+ * the SAME basis embedding → cosine 1.0, comfortably above
+ * DEDUP_COSINE_THRESHOLD regardless of UUID ordering. The longer observation is
+ * the proposedCanonical (length tie-break); a shared basis index across seedPair
+ * calls is fine because each test cleans up in afterEach.
  */
 async function seedPair(tag: string) {
-  const longObs = `The ${tag} topic has substantial context and surrounding detail that makes the observation verbose and information dense enough to survive the similarity threshold.`;
-  const shortObs = `The ${tag} topic has substantial context and surrounding detail that makes the observation`;
+  const longObs = `The ${tag} topic has substantial context and surrounding detail that makes the observation verbose and information dense.`;
+  const shortObs = `The ${tag} topic has substantial context.`;
   const a = await insertTestMemory({
     name: `roundtrip-${tag}-notes`,
     type: 'fact',
     observations: longObs,
+    embedding: basisEmbedding(1),
   });
   const b = await insertTestMemory({
     name: `roundtrip-${tag}-notes`,
     type: 'fact',
     observations: shortObs,
+    embedding: basisEmbedding(1),
   });
   createdIds.push(a.id, b.id);
   return { a, b };
