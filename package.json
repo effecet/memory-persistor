@@ -18,7 +18,7 @@
   "author": "effece",
   "license": "MIT",
   "dependencies": {
-    "@huggingface/transformers": "^4.2.0",
+    "@huggingface/transformers": "^4.3.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
