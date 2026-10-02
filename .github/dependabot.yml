@@ -12,6 +12,11 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "[deps]"
+    ignore:
+      # dotenv 18 changed DOTENV_CONFIG_QUIET handling and breaks the stdout-transport
+      # guard in tests/env-loading.test.ts. Stay on 17.x until that is resolved deliberately.
+      - dependency-name: "dotenv"
+        update-types: ["version-update:semver-major"]
     groups:
       npm-dependencies:
         patterns:
