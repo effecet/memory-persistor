@@ -1,0 +1,52 @@
+name: dependabot-automerge
+
+# Queues GitHub auto-merge on Dependabot PRs that are safe to take unattended:
+#   - package patch and minor bumps
+#   - GitHub Actions bumps (CI runs the new action, so a broken one fails the
+#     required checks; a bump touching claude-review.yml fails "review" and
+#     always needs a human)
+# Package MAJOR bumps are left for a human (and auto-merge is switched off if a
+# PR turns into one); the weekly digest lists them.
+# Queuing is not merging: branch protection still requires CI and Claude's
+# review ("review" check, Verdict: PASS) before GitHub merges.
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  automerge:
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+      - name: Queue auto-merge
+        if: >-
+          steps.meta.outputs.package-ecosystem == 'github_actions' ||
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --merge "$PR_URL"
+      - name: Leave everything else for a human
+        if: >-
+          steps.meta.outputs.package-ecosystem != 'github_actions' &&
+          steps.meta.outputs.update-type != 'version-update:semver-patch' &&
+          steps.meta.outputs.update-type != 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          DEPS: ${{ steps.meta.outputs.dependency-names }}
+          KIND: ${{ steps.meta.outputs.update-type }}
+        run: |
+          gh pr merge --disable-auto "$PR_URL" 2>/dev/null || true
+          echo "::notice::${KIND:-unknown update type} ($DEPS) - not auto-merged; review and merge by hand"
