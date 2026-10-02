@@ -43,7 +43,7 @@ jobs:
           if [ -n "$TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"
           else echo "::notice::CLAUDE_CODE_OAUTH_TOKEN not set; skipping Claude review"; fi
       - if: steps.token.outputs.present == 'true'
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - if: steps.token.outputs.present == 'true'
@@ -86,7 +86,7 @@ jobs:
           if [ -n "$TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"
           else echo "::notice::CLAUDE_CODE_OAUTH_TOKEN not set; skipping @claude"; fi
       - if: steps.token.outputs.present == 'true'
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - if: steps.token.outputs.present == 'true'
