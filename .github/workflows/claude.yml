@@ -18,10 +18,6 @@ on:
   issues:
     types: [opened]
 
-concurrency:
-  group: claude-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     if: >-
@@ -31,6 +27,11 @@ jobs:
       github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Scoped to this job: a workflow-level group let Claude's own review comment
+    # (an issue_comment event) start a run that cancelled the finishing review.
+    concurrency:
+      group: claude-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: write
