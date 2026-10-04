@@ -99,12 +99,97 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           SHA: ${{ github.event.pull_request.head.sha }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
+          ACTOR: ${{ github.actor }}
         run: |
+          # True when a Dependabot PR only moves action refs. Its commits must all be
+          # Dependabot's own (author dependabot[bot], committed and verified by GitHub),
+          # so nobody can push extra changes onto its branch and ride this exemption.
+          # The diff may touch only existing workflow files, and each changed line must
+          # be a `uses:` whose old and new versions keep the indent and action name.
+          only_ref_bumps() {
+            [ "$ACTOR" = "dependabot[bot]" ] || return 1
+            others=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/commits" --paginate --jq \
+              '.[] | select(.author.login != "dependabot[bot]" or .committer.login != "web-flow" or (.commit.verification.verified | not)) | .sha') || return 1
+            [ -z "$others" ] || return 1
+            gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/pr.diff" || return 1
+            python3 - "$RUNNER_TEMP/pr.diff" <<'PY'
+          import re, sys
+
+          # A `uses:` line: optional list dash, optional quotes, owner/action@ref,
+          # optional trailing comment that cannot hold another action reference.
+          USES = re.compile(
+              r"""^(?P<indent>\s*(?:-\s+)?)uses:\s*(?P<q>["']?)"""
+              r"""(?P<action>[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+)@(?P<ref>[A-Za-z0-9._/-]+)(?P=q)"""
+              r"""(?:\s+#[^@`$]*)?\s*$"""
+          )
+          HEADER_OK = ("index ", "--- a/", "+++ b/")
+
+          def check(text):
+              files = re.split(r"(?m)^(?=diff --git )", text)
+              files = [f for f in files if f.strip()]
+              if not files:
+                  return False
+              for f in files:
+                  lines = f.split("\n")
+                  m = re.fullmatch(r"diff --git a/(\S+) b/(\S+)", lines[0])
+                  if not m or m.group(1) != m.group(2):
+                      return False
+                  path = m.group(1)
+                  if not re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", path):
+                      return False
+                  i = 1
+                  while i < len(lines) and not lines[i].startswith("@@"):
+                      if not lines[i].startswith(HEADER_OK):
+                          return False  # rename, copy, mode change, new/deleted, binary
+                      i += 1
+                  body = lines[i:]
+                  if not body or not any(l.startswith("@@") for l in body):
+                      return False
+                  minus, plus = [], []
+                  pairs = []
+                  def flush():
+                      if len(minus) != len(plus):
+                          raise ValueError
+                      pairs.extend(zip(minus, plus))
+                      minus.clear(); plus.clear()
+                  try:
+                      for l in body:
+                          if l == "\\ No newline at end of file":
+                              continue
+                          if l.startswith("-"):
+                              if plus:
+                                  flush()
+                              minus.append(l[1:])
+                          elif l.startswith("+"):
+                              plus.append(l[1:])
+                          else:
+                              flush()
+                      flush()
+                  except ValueError:
+                      return False
+                  if not pairs:
+                      return False
+                  for old, new in pairs:
+                      a, b = USES.match(old), USES.match(new)
+                      if not a or not b:
+                          return False
+                      if a["indent"] != b["indent"] or a["action"] != b["action"]:
+                          return False
+              return True
+
+          sys.exit(0 if check(open(sys.argv[1]).read()) else 1)
+          PY
+          }
           # The action skips itself on a PR that edits this workflow (it must match the
-          # default branch). A human PR may do that; a Dependabot PR may not pass that way.
+          # default branch). A human PR may do that. A Dependabot PR may only when it
+          # does nothing but bump action refs; anything else needs a human merge.
           if gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only | grep -qx '.github/workflows/claude-review.yml'; then
             if [ "$AUTHOR" = "dependabot[bot]" ]; then
-              echo "::error::Dependabot PR edits claude-review.yml; it cannot be reviewed by itself, merge by hand"
+              if only_ref_bumps; then
+                echo "::notice::Dependabot PR only bumps action refs; passing without Claude review"
+                exit 0
+              fi
+              echo "::error::Dependabot PR edits claude-review.yml beyond action-ref bumps; merge by hand"
               exit 1
             fi
             echo "::notice::PR edits claude-review.yml; Claude review is skipped by design"
