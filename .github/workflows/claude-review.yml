@@ -26,7 +26,7 @@ jobs:
     if: >-
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:
       group: claude-review-${{ github.event.pull_request.number }}
@@ -100,6 +100,7 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
           ACTOR: ${{ github.actor }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           # True when a Dependabot PR only moves action refs. Its commits must all be
           # Dependabot's own (author dependabot[bot], committed and verified by GitHub),
@@ -204,5 +205,19 @@ jobs:
           elif printf '%s\n' "$verdicts" | grep -qx "Verdict: PASS $SHA"; then
             echo "Claude review verdict: PASS"
           else
+            # STALE_WORKFLOW_CHECK: the action silently skips itself when this branch's
+            # claude-review.yml differs from the default branch's (e.g. an action-pin bump
+            # landed after the PR was opened), so no verdict gets posted. Say so plainly.
+            wf=.github/workflows/claude-review.yml
+            head_blob=$(gh api "repos/$GITHUB_REPOSITORY/contents/$wf?ref=$SHA" --jq .sha 2>/dev/null || true)
+            base_blob=$(gh api "repos/$GITHUB_REPOSITORY/contents/$wf?ref=$DEFAULT_BRANCH" --jq .sha 2>/dev/null || true)
+            if [ -n "$head_blob" ] && [ -n "$base_blob" ] && [ "$head_blob" != "$base_blob" ]; then
+              if [ "$AUTHOR" = "dependabot[bot]" ]; then
+                echo "::error::Claude review was skipped: this branch's claude-review.yml differs from $DEFAULT_BRANCH's. Comment '@dependabot rebase' on the PR."
+              else
+                echo "::error::Claude review was skipped: this branch's claude-review.yml differs from $DEFAULT_BRANCH's. Rebase onto (or merge) $DEFAULT_BRANCH."
+              fi
+              exit 1
+            fi
             echo "::error::No Claude verdict for $SHA"; exit 1
           fi
