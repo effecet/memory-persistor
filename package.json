@@ -18,18 +18,18 @@
   "author": "effece",
   "license": "MIT",
   "dependencies": {
-    "@huggingface/transformers": "^4.3.0",
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@huggingface/transformers": "^4.3.1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "dotenv": "^17.4.2",
-    "drizzle-orm": "^0.45.3",
+    "drizzle-orm": "^0.45.4",
     "pg": "^8.23.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1",
     "drizzle-kit": "^0.31.11",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.4"
   }
 }
