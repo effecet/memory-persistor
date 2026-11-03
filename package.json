@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/mcp-server.ts",
-    "build": "tsc",
+    "build": "tsc && npm run typecheck",
     "test": "vitest run --exclude 'tests/integration/**'",
-    "test:integration": "vitest run tests/integration/ --fileParallelism=false",
+    "test:integration": "vitest run tests/integration/ --exclude 'tests/integration/isolated/**' --fileParallelism=false",
+    "test:integration:isolated": "vitest run tests/integration/isolated/ --fileParallelism=false",
+    "typecheck": "tsc -p tsconfig.scripts.json",
     "migrate": "echo \"Use: make migrate (applies drizzle/*.sql via psql). drizzle-kit generate is destructive here - drizzle/meta/ is gitignored.\" && exit 1",
     "seed": "tsx src/import.ts"
   },

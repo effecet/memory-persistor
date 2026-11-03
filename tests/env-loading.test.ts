@@ -8,7 +8,7 @@
  * days of events writes silently landed on the wrong DB.
  *
  * This suite enforces two structural invariants of the fix:
- *   1. src/mcp-server.ts does NOT contain `import 'dotenv/config'`.
+ *   1. src/mcp-server.ts and src/mcp-tools.ts do NOT contain `import 'dotenv/config'`.
  *   2. src/db.ts calls dotenv.config with { path, override: true }.
  *
  * It also exercises dotenv directly to confirm the `override: true` semantics
@@ -26,11 +26,14 @@ import * as dotenv from 'dotenv';
 const repoRoot = resolve(__dirname, '..');
 
 describe('env loading invariants', () => {
-  it('mcp-server.ts must not import dotenv/config (lets db.ts own env loading)', () => {
-    const src = readFileSync(join(repoRoot, 'src/mcp-server.ts'), 'utf8');
-    // Match actual import statement at line start — ignore docblock references.
-    expect(src).not.toMatch(/^\s*import\s+['"]dotenv\/config['"]/m);
-  });
+  it.each(['src/mcp-server.ts', 'src/mcp-tools.ts'])(
+    '%s must not import dotenv/config (lets db.ts own env loading)',
+    (rel) => {
+      const src = readFileSync(join(repoRoot, rel), 'utf8');
+      // Match actual import statement at line start — ignore docblock references.
+      expect(src).not.toMatch(/^\s*import\s+['"]dotenv\/config['"]/m);
+    },
+  );
 
   it('db.ts must pass { override: true } to dotenv.config', () => {
     const src = readFileSync(join(repoRoot, 'src/db.ts'), 'utf8');

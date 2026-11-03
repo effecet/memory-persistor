@@ -9,6 +9,8 @@ import { entities, memoryRelations } from '../../src/schema.js';
 import * as schema from '../../src/schema.js';
 import { EMBED_DIMS } from '../../src/config.js';
 import * as dotenv from 'dotenv';
+import type { EdgeProvenance } from '../../src/config.js';
+import { SEARCH_PATH_OPTIONS } from '../../src/search-path.js';
 import { assertSafeIntegrationTarget } from './db-guard.js';
 
 const { Pool } = pg;
@@ -39,8 +41,12 @@ assertSafeIntegrationTarget(
   process.env.ALLOW_NONLOCAL_INTEGRATION_DB === '1',
 );
 
+// Must match src/db.ts's pool: this suite asserts on behaviour that depends on
+// search_path resolution, and two pools with different options would diverge
+// silently — testDb would resolve names the code under test cannot.
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  options: SEARCH_PATH_OPTIONS,
 });
 
 export const testDb = drizzle(pool, { schema });
@@ -59,6 +65,8 @@ export async function insertTestMemory(overrides: Partial<{
   tier: string;
   accessCount: number;
   embedding: number[] | null;
+  originHost: string | null;
+  lastAccessedAt: Date;
 }> = {}) {
   const [entity] = await testDb
     .insert(entities)
@@ -73,6 +81,11 @@ export async function insertTestMemory(overrides: Partial<{
       tier: overrides.tier ?? 'HOT',
       accessCount: overrides.accessCount ?? 0,
       embedding: overrides.embedding ?? null,
+      // Additive, defaults preserve prior behaviour. originHost lets a test
+      // assert on machine attribution; lastAccessedAt lets it land a row inside
+      // or outside memory_thermal_decay()'s 24h staleness window deliberately.
+      originHost: overrides.originHost ?? null,
+      ...(overrides.lastAccessedAt ? { lastAccessedAt: overrides.lastAccessedAt } : {}),
     })
     .returning();
 
@@ -101,10 +114,11 @@ export async function insertTestRelation(
   toId: string,
   relationType = 'related_to',
   weight = 1.0,
+  provenance: EdgeProvenance = 'inferred',
 ) {
   const [relation] = await testDb
     .insert(memoryRelations)
-    .values({ fromId, toId, relationType, weight })
+    .values({ fromId, toId, relationType, weight, provenance })
     .returning();
 
   return relation;
@@ -143,7 +157,7 @@ export async function getMemory(id: string) {
  */
 export async function getRelations(id: string) {
   const result = await testDb.execute(sql`
-    SELECT r.id, r.from_id, r.to_id, r.relation_type, r.weight
+    SELECT r.id, r.from_id, r.to_id, r.relation_type, r.weight, r.provenance
     FROM public.memory_relations r
     WHERE r.from_id = ${id} OR r.to_id = ${id}
   `);

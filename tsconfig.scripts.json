@@ -1,0 +1,21 @@
+{
+  // Typecheck-only pass over scripts/ and tests/.
+  //
+  // The main tsconfig sets "include": ["src"] because rootDir/outDir target the
+  // build. That left scripts/ completely untypechecked, which is how
+  // scripts/backfill-edges.ts sat broken: it iterated recall()'s RecallResponse
+  // wrapper as if it were an array (TS2488, TypeError at runtime) from the moment
+  // the recall-cap change introduced the wrapper until 2026-09-06. Anything importing production SQL
+  // must be checked, or drift in it is silent.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node", "vitest/globals"]
+  },
+  // tests/ is deliberately EXCLUDED for now: adding it surfaces ~15 pre-existing
+  // strict-mode errors (possibly-undefined indexing, Record casts) that predate this
+  // branch and are their own cleanup. scripts/ is the gap that actually shipped a
+  // broken file, so that is what this closes.
+  "include": ["src", "scripts"]
+}

@@ -1,5 +1,6 @@
 .env
 .env.supabase
+ci*.env
 !.env.example
 !.env.supabase.example
 node_modules/
@@ -13,3 +14,4 @@ drizzle/meta/
 __pycache__/
 .pytest_cache/
 .claude/
+.playwright-mcp/

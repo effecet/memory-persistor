@@ -156,3 +156,27 @@ export async function resolveEmbeddingForTextChange(
   const embedding = await embedForWrite(name, observations);
   return embedding === null ? undefined : embedding;
 }
+
+/**
+ * Pick the (name, observations) pair a partial `update` should embed.
+ *
+ * `update` is a partial: either half of the embedding text may be absent from
+ * the request, in which case the stored row supplies it. This is a pure
+ * function purely so it is testable — the `update` handler that uses it lives
+ * on a module-private `server` object in mcp-server.ts and cannot be imported.
+ *
+ * `??` (not `||`) is load-bearing: an explicit `observations: ''` is a real
+ * edit that must survive, and `||` would silently replace it with the stored
+ * text. Both fields are `z.string().optional()` at the MCP boundary, so the
+ * absent case is always `undefined`, never `null`.
+ */
+export function resolveUpdateEmbeddingText(
+  name: string | undefined,
+  observations: string | undefined,
+  existing: { name: string; observations: string | null },
+): { name: string; observations: string | null } {
+  return {
+    name: name ?? existing.name,
+    observations: observations ?? existing.observations,
+  };
+}
