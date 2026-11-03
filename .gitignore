@@ -15,3 +15,8 @@ __pycache__/
 .pytest_cache/
 .claude/
 .playwright-mcp/
+
+# Golden ranking fixtures are snapshots of a real memory database: keep them local.
+tests/fixtures/golden-corpus.json
+tests/fixtures/golden-queries.json
+tests/fixtures/golden-baseline.json

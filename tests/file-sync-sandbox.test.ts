@@ -56,8 +56,9 @@ describe('file-sync stays inside CLAUDE_DIR', () => {
       tier: 'WARM',
       source: '/tmp/some/project',
     };
-    await syncToFile(entity);
-    await removeFile(entity);
+    // null = the explicit DB-unreachable sentinel: no live thermal lookup from a unit test.
+    await syncToFile(entity, null);
+    await removeFile(entity, null);
 
     expect(touched.length).toBeGreaterThan(0);
     const root = resolve(process.env.CLAUDE_DIR!);

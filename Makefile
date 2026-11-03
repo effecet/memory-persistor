@@ -88,7 +88,9 @@ test-integration: up ## Run integration tests — main set, then the isolated th
 	@# DOTENV_CONFIG_PATH, so recall() and the seeders hit the SAME clean DB.
 	@# mktemp keeps the derived connection string off the repo tree.
 	@ENVFILE=$$(mktemp); \
+		test -f .env || { echo "Missing .env (copy .env.example)"; rm -f $$ENVFILE; exit 1; }; \
 		grep -E '^DATABASE_URL' .env | sed 's#/$(PG_DEV_DB)#/$(PG_TEST_DB)#' > $$ENVFILE; \
+		grep -q '/$(PG_TEST_DB)' $$ENVFILE || { echo "DATABASE_URL in .env must end in /$(PG_DEV_DB) so the test database can be derived"; rm -f $$ENVFILE; exit 1; }; \
 		printf 'NODE_ENV=test\n' >> $$ENVFILE; \
 		DOTENV_CONFIG_PATH=$$ENVFILE npm run test:integration; \
 		STATUS=$$?; rm -f $$ENVFILE; exit $$STATUS
@@ -107,7 +109,9 @@ test-thermal: up ## Thermal + cutoffs suite on a corpus it owns — decay is tab
 	@# tests/test_dsn_argv_interpolation.py.)
 	$(call reset_db,$(PG_ISOLATED_DB))
 	@ENVFILE=$$(mktemp); \
+		test -f .env || { echo "Missing .env (copy .env.example)"; rm -f $$ENVFILE; exit 1; }; \
 		grep -E '^DATABASE_URL' .env | sed 's#/$(PG_DEV_DB)#/$(PG_ISOLATED_DB)#' > $$ENVFILE; \
+		grep -q '/$(PG_ISOLATED_DB)' $$ENVFILE || { echo "DATABASE_URL in .env must end in /$(PG_DEV_DB) so the test database can be derived"; rm -f $$ENVFILE; exit 1; }; \
 		printf 'NODE_ENV=test\n' >> $$ENVFILE; \
 		DOTENV_CONFIG_PATH=$$ENVFILE npm run test:integration:isolated; \
 		STATUS=$$?; rm -f $$ENVFILE; exit $$STATUS
@@ -117,13 +121,17 @@ reset-guard-db: up
 
 ranking-guard: reset-guard-db ## Ranking-regression guard against a fresh DB (skips without a golden corpus)
 	@ENVFILE=$$(mktemp); \
+		test -f .env || { echo "Missing .env (copy .env.example)"; rm -f $$ENVFILE; exit 1; }; \
 		grep -E '^DATABASE_URL' .env | sed 's#/$(PG_DEV_DB)#/$(PG_GUARD_DB)#' > $$ENVFILE; \
+		grep -q '/$(PG_GUARD_DB)' $$ENVFILE || { echo "DATABASE_URL in .env must end in /$(PG_DEV_DB) so the test database can be derived"; rm -f $$ENVFILE; exit 1; }; \
 		DOTENV_CONFIG_PATH=$$ENVFILE node --import tsx scripts/ranking-guard.ts; \
 		STATUS=$$?; rm -f $$ENVFILE; exit $$STATUS
 
 ranking-baseline: reset-guard-db ## Re-record the ranking baseline — REVIEW THE DIFF before committing
 	@ENVFILE=$$(mktemp); \
+		test -f .env || { echo "Missing .env (copy .env.example)"; rm -f $$ENVFILE; exit 1; }; \
 		grep -E '^DATABASE_URL' .env | sed 's#/$(PG_DEV_DB)#/$(PG_GUARD_DB)#' > $$ENVFILE; \
+		grep -q '/$(PG_GUARD_DB)' $$ENVFILE || { echo "DATABASE_URL in .env must end in /$(PG_DEV_DB) so the test database can be derived"; rm -f $$ENVFILE; exit 1; }; \
 		DOTENV_CONFIG_PATH=$$ENVFILE node --import tsx scripts/ranking-guard.ts --update-baseline; \
 		STATUS=$$?; rm -f $$ENVFILE; exit $$STATUS
 

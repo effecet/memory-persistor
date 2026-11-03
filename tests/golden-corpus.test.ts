@@ -65,8 +65,8 @@ describe('timestampForOffset', () => {
 describe('corpusDigest', () => {
   const base: GoldenCorpus = {
     generatedAt: '2026-09-08T00:00:00Z',
-    sourceCommit: 'aff7272',
-    liveShape: { entities: 904, edges: 1794, maxDegree: 291 },
+    sourceCommit: 'abc1234',
+    liveShape: { entities: 500, edges: 1000, maxDegree: 100 },
     entities: [
       {
         id: 'b1',

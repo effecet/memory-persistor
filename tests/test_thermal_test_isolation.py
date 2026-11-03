@@ -22,7 +22,7 @@ unnoticed (see `tests/test_psql_call_sites.py`).
 ⚠️ The wiring assertions below assert that the Makefile, the npm scripts and the
 CI workflow ACTUALLY USE the isolated database — never merely that its name
 appears somewhere. The first version of this file checked substrings, and four
-separate mutations passed it 7/7 during the the isolated thermal suite review:
+separate mutations passed it 7/7 during review:
 
   A. `test-thermal` reset with `$(PG_TEST_DB)` — both phases on one database.
   B. `@$(MAKE) test-thermal` deleted — the thermal suite silently never runs.
@@ -34,8 +34,7 @@ separate mutations passed it 7/7 during the the isolated thermal suite review:
      leftover `CREATE DATABASE thermal_isolated` step satisfied the substring.
 
 Each of A-D now has a test that goes red. A guard that only proves a NAME EXISTS
-proves nothing about what runs; see the memory
-`feedback: A gate that never exercises the new path reports a clean pass`.
+proves nothing about what runs.
 """
 
 import json

@@ -89,11 +89,10 @@ def _runs_a_different_program(node: ast.AST | None) -> bool:
     path — `["/opt/homebrew/bin/psql", dsn, ...]` — is not equal to the bare
     string `"psql"`, so the old exact-match version of this predicate wrongly
     classified it as "a different program" and exempted it from verification
-    entirely, with the full suite staying green. Absolute paths to psql are
-    this fleet's house style under launchd/systemd (`notify()`'s
-    `/opt/homebrew/bin/terminal-notifier`, the plist's
-    `/opt/homebrew/bin/python3`), so this is not a hypothetical shape.
-    `PurePosixPath` is deliberate and sufficient — this fleet is macOS + Linux
+    entirely, with the full suite staying green. Absolute paths to binaries are
+    common under launchd/systemd, where PATH is minimal, so this is not a
+    hypothetical shape.
+    `PurePosixPath` is deliberate and sufficient — the scripts target macOS + Linux
     only, never Windows, so there is no backslash-separator case to handle.
     """
     if not (isinstance(node, ast.List) and bool(node.elts)):
@@ -111,13 +110,8 @@ def _runs_a_different_program(node: ast.AST | None) -> bool:
 #: discovered by walking the AST. A new dynamic-argv call fails loudly and has
 #: to be added here deliberately, and a rename breaks the test rather than
 #: silently widening it.
-_DYNAMIC_ARGV_OK = {
-    # Shells `make backfill-embeddings-remote`; the target resolves its own DSN
-    # via DOTENV_CONFIG_PATH, so nothing sensitive is ever in this argv.
-    ("brain_canary.py", "_default_backfill_runner"),
-    # terminal-notifier on the Mac. No database involvement at all.
-    ("canary_mac.py", "notify"),
-}
+#: Empty today: no script in this repo builds a dynamic argv.
+_DYNAMIC_ARGV_OK: set[tuple[str, str]] = set()
 
 
 def _subprocess_aliases(tree: ast.AST) -> set[str]:
@@ -207,7 +201,7 @@ SCRIPTS = sorted(
     for root in SCAN_ROOTS
     if root.is_dir()
     # Recursive: `glob("*.py")` only reached each root's top level, so a
-    # future `claude-config/hooks/lib/db.py` would be invisible to every test
+    # future `scripts/lib/db.py` would be invisible to every test
     # in this file. `tests/` subdirectories (test doubles that monkeypatch
     # subprocess.run rather than invoking it) and `__pycache__` are excluded —
     # they are not production call sites, and scanning them would demand

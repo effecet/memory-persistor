@@ -145,7 +145,7 @@ const HEADS: Readonly<Record<string, ReadonlySet<string>>> = {
   str: new Set(['conn', 'connection']),
   string: new Set(['conn', 'connection']),
   header: new Set(['auth']),
-  accounts: new Set(['codeberg']),
+  accounts: new Set(['gitea']),
 };
 /** A trailing noun that names a secret's metadata rather than its value. */
 const METADATA_TAILS = new Set([

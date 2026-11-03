@@ -7,8 +7,7 @@
  * ⚠️ This script MUST NOT import or call `recall()`. `recall` calls `bump()` on
  * every row it returns, which increments access_count and raises temperature —
  * two of the five signals under measurement. Benchmarking through it would move
- * the thing being measured, and the effect compounds over runs (see the memory
- * `recall() reheats the corpus it reads`). Everything here is a plain SELECT
+ * the thing being measured, and the effect compounds over runs. Everything here is a plain SELECT
  * built from the expressions retrieve.ts exports, so the harness cannot drift
  * from production scoring either.
  *

@@ -1,12 +1,10 @@
-"""Tests for claude-config/hooks/psql_dsn.py — keeping the DB password out of psql's argv.
+"""Tests for scripts/psql_dsn.py — keeping the DB password out of psql's argv.
 
 The security property under test is narrow and absolute: whatever comes back as
 the argv DSN must not contain the password, for every DSN shape we actually
 meet. Tests assert the HARM (password absent from argv) rather than the shape of
 the return value, so a refactor that keeps the API but reintroduces the leak
 still fails.
-
-Filed against an earlier issue, deferred follow-up 1.
 """
 
 from __future__ import annotations
@@ -16,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-_HOOKS = Path(__file__).resolve().parent.parent / "claude-config" / "hooks"
-sys.path.insert(0, str(_HOOKS))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import psql_dsn as pd  # noqa: E402
 

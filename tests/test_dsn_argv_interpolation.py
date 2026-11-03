@@ -1,15 +1,11 @@
 """Inverted guard: no shell-expanded secret may land in a command's argv.
 
 `tests/test_psql_call_sites.py` is the *enumeration* guard — it walks the AST
-of every Python file and proves each `psql` invocation routes its DSN through
-`psql_env()`. It closed nine sites in `scripts/` and four in
-`claude-config/hooks/`.
-
-It could not see the tenth. `Makefile:241` handed the full DSN to `sed` in
-argv, and a Makefile is not Python, so the AST guard's discovery mechanism had
-no reach there at all. That is not a gap in a list — it is a gap in the
-DOMAIN the list is drawn from. The repo's own recurring failure shape,
-one level up: we had guarded the language, not the repository.
+of every Python script and proves each `psql` invocation routes its DSN through
+`psql_env()`. It cannot see a Makefile recipe or a workflow step that hands a
+DSN to `sed` in argv: a Makefile is not Python, so the AST guard has no reach
+there at all. That is not a gap in a list — it is a gap in the DOMAIN the list
+is drawn from.
 
 So this guard is INVERTED. It does not enumerate known-dangerous call sites and
 check them. It asserts a property over every file where shell expansion is the
@@ -30,46 +26,39 @@ THE ONE EXEMPTION: assignment-prefix position
 ────────────────────────────────────────────────────────────────────────────
 DENY BY DEFAULT
 ────────────────────────────────────────────────────────────────────────────
-the argv audit warned that regex-over-Make is brittle. The answer is not a cleverer
-regex. It is that any line carrying a secret-shaped expansion which this
-parser cannot confidently classify FAILS, rather than passing quietly.
-Brittleness becomes a loud demand for an explicit decision instead of a
-silent miss — the same posture `test_psql_call_sites.py` already takes.
+Regex-over-Make is brittle. The answer is not a cleverer regex. It is that any
+line carrying a secret-shaped expansion which this parser cannot confidently
+classify FAILS, rather than passing quietly. Brittleness becomes a loud demand
+for an explicit decision instead of a silent miss — the same posture
+`test_psql_call_sites.py` already takes.
 
 ────────────────────────────────────────────────────────────────────────────
 WHY THE TARGET SET IS A FIXED ROOT LIST, NOT A REPO-WIDE GLOB
 ────────────────────────────────────────────────────────────────────────────
 A guard that discovers its own targets must do so within a universe that does
 not vary by machine, or its verdict describes the machine rather than the code.
-CI for this repo runs on ONE self-hosted runner (`pi-arm64`); a guard that
-false-positives there blocks every push for every machine.
 
 The roots below are fixed and committed, and every file in them is tracked.
 A clean CI checkout therefore scans a SUBSET of what a dev machine scans
 (untracked scratch files exist only locally). That asymmetry is deliberate and
 is the safe direction: a failure in CI necessarily reproduces locally.
-`test_scan_set_is_populated` asserts PER ROOT, not just in total — a total-only
-assert was satisfied by one root's six files while another matched zero.
+`test_each_scan_root_matches_files` asserts PER ROOT, not just in total — a
+total-only assert can be satisfied by one root while another matches zero.
 
 Workflow YAML is scanned through `_extract_run_blocks`, which feeds ONLY the
-bodies of `run:` steps to the shell parser. A first attempt scanned the raw
-YAML and flagged `TELEGRAM_TOKEN: ${{ secrets.X }}` — an `env:` mapping, not a
-command — which would have red-CI'd the single runner. Workflows were then
-almost left out entirely; six reviewers pointed out that this same commit fixes
-two token-in-argv leaks in those files, so omitting them would leave the fix
-silently revertible. That is precisely the the liveness check → the DSN-in-argv fix mistake one domain up.
+bodies of `run:` steps to the shell parser. Scanning raw YAML would flag
+`SOME_TOKEN: ${{ secrets.X }}` — an `env:` mapping, not a command. Leaving
+workflows out entirely would leave any token-in-argv fix in them silently
+revertible.
 
 ────────────────────────────────────────────────────────────────────────────
-MUST-NOT-FLAG, AND WHY IT NEARLY BROKE THE PI
+MUST-NOT-FLAG: make variables
 ────────────────────────────────────────────────────────────────────────────
-`Makefile:271`, inside `install-canary-pi`:
-
-    sed "s|@REPO@|$(CURDIR)|g" scripts/brain-canary.service > ...
+    sed "s|@REPO@|$(CURDIR)|g" some.service.template > ...
 
 `$(CURDIR)` is a MAKE variable holding a repo path — single `$`, expanded by
 make, never by a shell — and `CURDIR` is not secret-shaped. A predicate keyed
-on "sed with a substitution" rather than on the variable NAME would flag it and
-red-CI the Pi's own install target: a guard written on the Mac breaking the Pi.
+on "sed with a substitution" rather than on the variable NAME would flag it.
 Pinned by `test_allows_make_variable_substitution`.
 
 ────────────────────────────────────────────────────────────────────────────
@@ -80,8 +69,6 @@ the file, which catches the rename-the-variable evasion. It does not follow a
 secret through a file write, an `export` in a sourced script, or `xargs`.
 `test_known_limits_are_pinned` records the shapes that still pass, so the next
 person widening this guard can see the edge rather than rediscover it.
-
-Filed against an earlier issue.
 """
 
 from __future__ import annotations
@@ -106,8 +93,8 @@ SCAN_SPECS: tuple[tuple[Path, str], ...] = (
 #: A variable name that may hold a credential. Case-insensitive: shell
 #: convention is uppercase, but a lowercase `$db_password` leaks just as widely.
 #: The `_KEY` / `_PASS` / `CREDENTIAL` / `_PAT` families were added after a
-#: review found `SUPABASE_SERVICE_ROLE_KEY`, `ANON_KEY`, `BREVO_SMTP_PASS` and
-#: `CODEBERG_ACCOUNTS` all sailing past the original pattern.
+#: review found names like `SUPABASE_SERVICE_ROLE_KEY`, `ANON_KEY`, `SMTP_PASS` and
+#: `GITEA_ACCOUNTS` all sailing past the original pattern.
 SECRET_NAME_RE = re.compile(
     r"""^(
           DATABASE_URL | DB_URL | .*_DATABASE_URL | DSN | .*_DSN
@@ -115,7 +102,7 @@ SECRET_NAME_RE = re.compile(
         | .*CONNECTION_STRING
         | .*_SECRET | SECRET | .*_TOKEN | TOKEN | .*_PAT
         | .*_KEY | API_?KEY | .*CREDENTIAL.*
-        | CODEBERG_ACCOUNTS
+        | GITEA_ACCOUNTS
         )$""",
     re.IGNORECASE | re.VERBOSE,
 )
@@ -313,8 +300,8 @@ SHELL_KEYWORDS: frozenset[str] = frozenset({
 
 #: Shell builtins fork no process, so they create no `/proc/<pid>/cmdline` and
 #: no `ps` entry — a secret in their arguments is never disclosed. This is the
-#: distinction the argv audit draws when it rules `Makefile:240` (`test -n "$$DB_URL"`)
-#: NOT a leak while `Makefile:241` (`sed …`) is one.
+#: distinction between `test -n "$$DB_URL"` (a test, NOT a leak) and
+#: `sed …$$DB_URL…` (an argv leak).
 #:
 #: `echo` and `printf` are builtins in both `dash` (Make's default `/bin/sh`)
 #: and `bash`, which is what runs every recipe and CI step here. `let`,
@@ -353,7 +340,7 @@ def _extract_run_blocks(text: str) -> list[tuple[int, str]]:
     """Return ``(line_number, shell_line)`` for every `run:` body in a workflow.
 
     Only `run:` bodies are shell. Feeding raw YAML to the shell parser flagged
-    `TELEGRAM_TOKEN: ${{ secrets.X }}` — an `env:` mapping — as a command
+    `NOTIFY_TOKEN: ${{ secrets.X }}` — an `env:` mapping — as a command
     invocation, which on a single-runner CI would have blocked every push.
     A dependency-free scan is used deliberately: the CI job installs only
     pytest, httpx, respx and python-dotenv, so PyYAML is not available.
@@ -367,8 +354,8 @@ def _extract_run_blocks(text: str) -> list[tuple[int, str]]:
         # the list dash. Measuring from the dash put the boundary too far left,
         # so sibling keys at the step's own indent (`env:` and its mappings)
         # were swallowed into the run body and parsed as shell — reintroducing
-        # exactly the `TELEGRAM_TOKEN: ${{ secrets.X }}` false positive that
-        # would red-CI the single runner. Only the `- run: |` spelling was
+        # exactly the `NOTIFY_TOKEN: ${{ secrets.X }}` false positive that
+        # would fail CI. Only the `- run: |` spelling was
         # affected, which is why the current workflows did not expose it.
         m = re.match(r"^(\s*(?:-\s+)?)run:\s*(\S.*)?$", raw)
         if not m:
@@ -429,7 +416,7 @@ def _strip_comment(line: str, quote: str | None = None) -> tuple[str, str | None
     state across lines was tried and reverted: a single line with an odd number
     of quotes — routine in Makefile comments and in `sed 's/x/y/'` recipes —
     poisons every following line, leaving real comments unstripped and producing
-    repo-wide false positives (measured: `Makefile:136`'s comment parsed as a
+    repo-wide false positives (measured: a Makefile comment parsed as a
     command named `#`). The cost of per-line is one narrow miss, pinned in
     `test_known_limits_are_pinned`: a line that STARTS with `#` while inside a
     multi-line double-quoted string is treated as a comment and dropped.
@@ -600,7 +587,7 @@ def _scan_statement_tree(
         if assign:
             # ONE-HOP TAINT. `V=$(grep '^DATABASE_URL=' .env)` then `sed "…$V…"`
             # renames the secret and evades a name-only predicate; review
-            # demonstrated exactly that against `Makefile:239`. Record the
+            # demonstrated exactly that against a Makefile recipe. Record the
             # alias so later uses are caught.
             lhs = assign.group(1)
             if any(_mentions_secret_name(b, tainted) for b in subs) or any(
@@ -675,7 +662,7 @@ def test_no_secret_is_interpolated_into_argv():
 def test_each_scan_root_matches_files(root, pattern):
     """Per-root, because a total-only assert hid a root matching zero files.
 
-    A `>= 5` total was satisfied by `claude-config/hooks/` alone, so a moved or
+    A total-only assert can be satisfied by one root alone, so a moved or
     renamed root would have gone unnoticed — the vacuity this is meant to stop.
     `scripts/*.sh` is excluded above: that directory legitimately holds no shell
     scripts today, and the spec is kept so a future one is covered on arrival.
@@ -701,16 +688,16 @@ def test_reverting_the_workflow_fix_is_caught():
         '        run: |\n'
         '          HTTP_CODE=$(curl -sS -o /tmp/r.json -w "%{http_code}" \\\n'
         '            --data-urlencode "chat_id=${CHAT_ID}" \\\n'
-        '            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage")\n'
+        '            "https://notify.example.com/bot${NOTIFY_TOKEN}/sendMessage")\n'
     )
     assert scan_text(pre_fix, is_yaml=True), "revert of the workflow fix not caught"
 
 
 def test_yaml_env_mapping_is_not_mistaken_for_a_command():
-    """The false positive that would have red-CI'd the single Pi runner."""
+    """The false positive that would have failed CI."""
     env_block = (
         "        env:\n"
-        "          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_CI_TOKEN }}\n"
+        "          NOTIFY_TOKEN: ${{ secrets.NOTIFY_CI_TOKEN }}\n"
         '          CHAT_ID: "100000000"\n'
     )
     assert not scan_text(env_block, is_yaml=True)
@@ -720,9 +707,9 @@ def test_yaml_env_mapping_is_not_mistaken_for_a_command():
 
 
 def test_flags_the_sed_form_that_issue_77_found():
-    """The exact shape of Makefile:241, as a mutation control."""
+    """The exact shape of a DSN handed to sed in argv, as a mutation control."""
     make_line = 'sed "s|@DATABASE_URL@|$$DB_URL|" in.plist > out.plist'
-    assert scan_text(make_line, is_make=True), "guard blind to the the argv audit leak"
+    assert scan_text(make_line, is_make=True), "guard blind to the argv audit leak"
 
 
 @pytest.mark.parametrize(
@@ -731,19 +718,19 @@ def test_flags_the_sed_form_that_issue_77_found():
         'psql "$DATABASE_URL" -c "select 1"',
         "psql ${DATABASE_URL} -c 'select 1'",
         'foo --dsn="$MY_DSN"',
-        'curl "https://api.example.com/bot${{ secrets.TELEGRAM_TOKEN }}/send"',
+        'curl "https://api.example.com/bot${{ secrets.NOTIFY_TOKEN }}/send"',
         # Substitution OUTPUT becomes the outer command's argument, even though
         # the inner command is a fork-free builtin.
         'cmd "$(printf %s "$PGPASSWORD")"',
         'psql "$(cat /run/secrets/DB_URL)" -c "select 1"',
         # Parameter-expansion modifiers used to slip the anchored name match.
         'psql "${DATABASE_URL:-}" -c x',
-        'curl -H "Auth: ${CODEBERG_TOKEN#Bearer }" u',
+        'curl -H "Auth: ${GITEA_TOKEN#Bearer }" u',
         # Backticks carry no `$`, so an earlier fast path skipped the line.
         "psql `cat /run/secrets/DB_URL`",
         # Secret families a review found missing from the name pattern.
         'curl -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" u',
-        'mysql --password="$BREVO_SMTP_PASS"',
+        'mysql --password="$SMTP_PASS"',
     ],
 )
 def test_flags_evasion_shapes(line):
@@ -753,7 +740,7 @@ def test_flags_evasion_shapes(line):
 def test_flags_the_rename_the_variable_evasion():
     """One-hop taint: aliasing the secret must not launder it.
 
-    Review demonstrated this against `Makefile:239` — renaming `DB_URL` to
+    Review demonstrated this against a Makefile recipe — renaming `DB_URL` to
     `URLV` left the leak byte-identical and the suite green.
     """
     make_lines = (
@@ -770,8 +757,8 @@ def test_flags_the_rename_the_variable_evasion():
         ('DATABASE_URL="$$DATABASE_URL" python3 scripts/events_canary.py', True),
         ("PGPASSWORD=postgres psql -h postgres -U postgres -c 'select 1'", False),
         # Make variable holding a repo path — the near-miss that would have
-        # red-CI'd the Pi's own install target.
-        ('sed "s|@REPO@|$(CURDIR)|g" scripts/brain-canary.service', True),
+        # red-CI'd an install target.
+        ('sed "s|@REPO@|$(CURDIR)|g" some.service.template', True),
         # The literal NAME, never the value.
         ("grep -E '^DATABASE_URL' .env > $$ENVFILE", True),
         ('echo "plist contains DATABASE_URL"', True),
@@ -789,8 +776,8 @@ def test_allows_safe_shapes(line, is_make):
 @pytest.mark.parametrize(
     "line",
     [
-        'test -n "$DB_URL"',  # Makefile:240 — the argv audit argues this is NOT a leak
-        '[ -z "$TELEGRAM_TOKEN" ] && exit 0',  # lint-unit.yml:108
+        'test -n "$DB_URL"',  # a test, not a leak
+        '[ -z "$NOTIFY_TOKEN" ] && exit 0',  # a test, not a leak
         '[ "$ENV_TOKEN" != "$CJSON_TOKEN" ]',  # a comparison, not a command
         'printf %s "$PGPASSWORD"',
         'export DATABASE_URL="$DATABASE_URL"',
@@ -817,8 +804,8 @@ def test_allows_builtin_call_split_across_continuation_lines():
 
 
 def test_allows_make_variable_substitution():
-    """Regression pin for the Pi near-miss described in the module docstring."""
-    line = 'sed "s|@REPO@|$(CURDIR)|g" scripts/brain-canary.service > out.service'
+    """Regression pin for the make-variable case described in the module docstring."""
+    line = 'sed "s|@REPO@|$(CURDIR)|g" some.service.template > out.service'
     assert not scan_text(line, is_make=True)
 
 
@@ -897,22 +884,22 @@ def test_apostrophe_in_a_comment_does_not_desynchronise_the_parser():
 
 def test_hash_inside_a_word_is_not_treated_as_a_comment():
     """`${TOKEN#Bearer }` and URL fragments must survive comment stripping."""
-    assert scan_text('curl -H "Auth: ${CODEBERG_TOKEN#Bearer }" https://x/y#frag')
+    assert scan_text('curl -H "Auth: ${GITEA_TOKEN#Bearer }" https://x/y#frag')
 
 
 def test_dash_run_block_does_not_swallow_sibling_keys():
     """`- run: |` measured its boundary from the dash, not from `run:`.
 
     That pulled the step's own `env:` mapping into the shell body, resurrecting
-    the `TELEGRAM_TOKEN: ${{ secrets.X }}` false positive that would red-CI the
-    single runner. Only this spelling was affected, so neither current workflow
+    the `NOTIFY_TOKEN: ${{ secrets.X }}` false positive that would fail
+    CI. Only this spelling was affected, so neither current workflow
     exposed it — it was armed for the next step written this way.
     """
     dash_form = (
         "      - run: |\n"
         "          echo hi\n"
         "        env:\n"
-        "          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_CI_TOKEN }}\n"
+        "          NOTIFY_TOKEN: ${{ secrets.NOTIFY_CI_TOKEN }}\n"
     )
     assert not scan_text(dash_form, is_yaml=True)
 
@@ -921,7 +908,7 @@ def test_dash_run_block_still_scans_its_own_body():
     """The boundary fix must not stop `- run:` bodies being scanned at all."""
     dash_form = (
         "      - run: |\n"
-        '          curl "https://x/bot${TELEGRAM_TOKEN}/send"\n'
+        '          curl "https://x/bot${NOTIFY_TOKEN}/send"\n'
     )
     assert scan_text(dash_form, is_yaml=True)
 

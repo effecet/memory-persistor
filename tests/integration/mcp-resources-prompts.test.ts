@@ -56,7 +56,7 @@ async function settled(read: () => Promise<number>): Promise<number> {
     if (now === prev) return now;
     prev = now;
   }
-  return prev;
+  throw new Error(`event count never settled (last ${prev}); an earlier write is still landing`);
 }
 
 async function thermal(id: string): Promise<{ temperature: number; access_count: number }> {

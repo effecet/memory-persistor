@@ -135,18 +135,18 @@ describe('resolvePending', () => {
 describe('updatePending', () => {
   it('corrects a title while preserving the row identity', async () => {
     const row = await addPending({
-      title: '~/.claude/hooks is backed up nowhere',
+      title: 'nightly job writes nowhere',
       category: 'automation',
       body: 'EVIDENCE (server-b): ...',
       priority: 'high',
     });
 
     const updated = await updatePending(row.id, {
-      title: 'server-b only: ~/.claude/hooks is backed up nowhere',
+      title: 'server-b only: nightly job writes nowhere',
     });
 
     expect(updated).not.toBeNull();
-    expect(updated!.title).toBe('server-b only: ~/.claude/hooks is backed up nowhere');
+    expect(updated!.title).toBe('server-b only: nightly job writes nowhere');
 
     // The whole point of the issue: archive+re-add destroyed these. An update
     // must not.

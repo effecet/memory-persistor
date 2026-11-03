@@ -44,7 +44,7 @@ Body of the ancient item.
 Body of the nested entry.
 -->
 
-<!-- ARCHIVED 2026-04-20 (resolved in commit 89113ea):
+<!-- ARCHIVED 2026-04-20 (resolved in commit a1b2c3d):
      - note-only block, no entry header
 -->
 """
@@ -113,7 +113,7 @@ class TestParseArchivedBlocks:
 
 
 class TestNormalization:
-    """Legacy-data drift present in the real pending.md, audited 2026-08-07."""
+    """Legacy-data drift seen in hand-maintained pending.md files."""
 
     def test_slash_joined_category_takes_the_first_token(self) -> None:
         assert ip.normalize_category("rule / automation") == "rule"
@@ -213,7 +213,7 @@ class TestToSqlValues:
 class TestArchivedPreamble:
     """Resolution prose between an ARCHIVED header line and its first nested
     entry must survive — parse_entries only sees text AFTER a header, so
-    without _block_preamble it is silently dropped. Four of the seventeen real
+    without _block_preamble it is silently dropped. Some real
     blocks carry such prose, the largest 1.7 kB.
     """
 
@@ -243,12 +243,12 @@ class TestArchivedPreamble:
         assert "ARCHIVED 2026-05-04" in nested.body
 
     def test_multi_line_header_is_not_garbled(self) -> None:
-        # 2 of the 4 real blocks wrap their header parenthetical. A line-based
-        # strip left fragments like "accumulated permission grants):" as the
+        # some real blocks wrap their header parenthetical. A line-based
+        # strip left fragments like "generated output files):" as the
         # entire preamble.
         block = (
-            "<!-- ARCHIVED 2026-05-04 (resolved in commit 8e94897 [harness] capture\n"
-            "accumulated permission grants):\n"
+            "<!-- ARCHIVED 2026-05-04 (resolved in commit d4e5f6a [tools] clean up\n"
+            "generated output files):\n"
             "## [2026-05-01] Land the grant\n"
             "**Category:** rule\n"
             "**Priority:** low\n"
@@ -256,9 +256,9 @@ class TestArchivedPreamble:
             "-->"
         )
         row = ip.parse_archived_blocks([block])[0]
-        assert "resolved in commit 8e94897" in row.body
-        assert "accumulated permission grants" in row.body
-        assert row.body.count("accumulated permission grants") == 1
+        assert "resolved in commit d4e5f6a" in row.body
+        assert "generated output files" in row.body
+        assert row.body.count("generated output files") == 1
         assert "Real body." in row.body
 
     def test_header_only_block_yields_header_plus_body(self) -> None:
@@ -431,39 +431,23 @@ class TestExplicitTargetRequired:
         assert "no explicit target" in err
         # Names the host it would have used, so the operator sees the mistake.
         assert "localhost:5432/memory_persistor" in err
-        assert "--dsn" in err
+        assert "DATABASE_URL" in err
         assert "--i-know-the-target" in err
+        assert "--dsn" not in err
 
-    def test_apply_with_dsn_wins_over_auto_resolution(
-        self, monkeypatch, capsys, tmp_path
-    ) -> None:
+    def test_dsn_flag_is_not_accepted(self, monkeypatch, tmp_path) -> None:
+        """A connection string in argv is readable by every user on the host
+        (/proc/<pid>/cmdline) and lands in shell history. The target comes
+        from DATABASE_URL or a confirmed auto-resolution, never argv."""
         src = self._src(tmp_path)
-        monkeypatch.delenv("DATABASE_URL", raising=False)
-        monkeypatch.setattr(
-            ip, "resolve_connection_string", lambda: "postgresql://x@localhost:5432/wrong_db"
-        )
-        calls: list[list[str]] = []
-
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            sql = args[-1]
-            if "SELECT count" in sql:
-                return _FakeCompleted(0, "0")
-            return _FakeCompleted(0, "INSERT 0 1")
-
-        monkeypatch.setattr(ip.subprocess, "run", fake_run)
         monkeypatch.setattr(
             sys,
             "argv",
-            ["import_pending.py", "--file", str(src), "--apply", "--dsn", "postgresql://a@example.com:6543/right_db"],
+            ["import_pending.py", "--file", str(src), "--apply", "--dsn", "postgresql://a:pw@example.com/db"],
         )
-
-        rc = ip.main()
-        out = capsys.readouterr().out
-        assert rc == 0
-        assert "Target: example.com:6543/right_db" in out
-        # Neither call went to the auto-resolved (wrong) host.
-        assert all("wrong_db" not in " ".join(c) for c in calls)
+        with pytest.raises(SystemExit) as exc:
+            ip.main()
+        assert exc.value.code == 2
 
     def test_apply_with_database_url_env_is_explicit(
         self, monkeypatch, capsys, tmp_path
@@ -503,9 +487,11 @@ class TestRerunGuard:
             "--file",
             str(src),
             "--apply",
-            "--dsn",
-            "postgresql://a@localhost:5432/memory_persistor",
         ]
+
+    @pytest.fixture(autouse=True)
+    def _explicit_target(self, monkeypatch) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://a@localhost:5432/memory_persistor")
 
     def test_existing_rows_abort_without_force(self, monkeypatch, capsys, tmp_path) -> None:
         src = tmp_path / "pending.md"
@@ -675,8 +661,8 @@ class TestArchivedRowsCarryResolvedAtAndResolution:
 
     def test_multi_line_header_prose_is_collapsed_to_one_line(self) -> None:
         block = (
-            "<!-- ARCHIVED 2026-05-04 (resolved in commit 8e94897 [harness] capture\n"
-            "accumulated permission grants):\n"
+            "<!-- ARCHIVED 2026-05-04 (resolved in commit d4e5f6a [tools] clean up\n"
+            "generated output files):\n"
             "## [2026-05-01] Land the grant\n"
             "**Category:** rule\n"
             "**Priority:** low\n"
@@ -685,15 +671,15 @@ class TestArchivedRowsCarryResolvedAtAndResolution:
         )
         row = ip.parse_archived_blocks([block])[0]
         assert "\n" not in row.resolution
-        assert "commit 8e94897" in row.resolution
-        assert "accumulated permission grants" in row.resolution
+        assert "commit d4e5f6a" in row.resolution
+        assert "generated output files" in row.resolution
 
     def test_note_only_block_carries_resolved_at_and_resolution(self) -> None:
         _, blocks = ip.strip_archived(SAMPLE)
         rows = ip.parse_archived_blocks(blocks)
         note = [r for r in rows if r.title.startswith("[archived note]")][0]
         assert note.resolved_at == date(2026, 4, 20)
-        assert "commit 89113ea" in note.resolution
+        assert "commit a1b2c3d" in note.resolution
 
     def test_header_without_a_parenthetical_still_gets_a_resolution(self) -> None:
         block = (
@@ -784,8 +770,10 @@ class TestNullableColumnRendering:
 
 
 class TestResolveConnectionString:
-    """Self-contained resolution order: non-local DATABASE_URL, then the
-    DOTENV_CONFIG_PATH file, then the repo's .env.supabase, then .env."""
+    """Resolves the database the MCP server would use (src/db.ts): the
+    DOTENV_CONFIG_PATH file, else the repo's .env, overrides the environment
+    (dotenv `override: true`); DATABASE_URL in the environment is the fallback.
+    A repo .env.supabase is never consulted implicitly."""
 
     @pytest.fixture(autouse=True)
     def _isolate(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -793,28 +781,34 @@ class TestResolveConnectionString:
         monkeypatch.delenv("DOTENV_CONFIG_PATH", raising=False)
         monkeypatch.setattr(ip, "REPO_DIR", tmp_path)
 
-    def test_non_local_env_url_wins(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        (tmp_path / ".env").write_text("DATABASE_URL=postgresql://localhost/from_file\n")
-        monkeypatch.setenv("DATABASE_URL", "postgresql://u@db.example.com/remote")
-        assert ip.resolve_connection_string() == "postgresql://u@db.example.com/remote"
-
-    def test_local_env_url_defers_to_the_dotenv_config_path_file(
+    def test_dotenv_config_path_file_overrides_the_environment(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         cfg = tmp_path / "custom.env"
         cfg.write_text('DATABASE_URL="postgresql://u@db.example.com/configured"\n')
-        monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/local")
+        (tmp_path / ".env").write_text("DATABASE_URL=postgresql://localhost/repo_env\n")
+        (tmp_path / ".env.supabase").write_text("DATABASE_URL=postgresql://u@managed.example.com/m\n")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u@other.example.com/from_env")
         monkeypatch.setenv("DOTENV_CONFIG_PATH", str(cfg))
         assert ip.resolve_connection_string() == "postgresql://u@db.example.com/configured"
 
-    def test_repo_env_supabase_before_env(self, tmp_path: Path) -> None:
-        (tmp_path / ".env").write_text("DATABASE_URL=postgresql://localhost/local\n")
-        (tmp_path / ".env.supabase").write_text("DATABASE_URL=postgresql://u@db.example.com/managed\n")
-        assert ip.resolve_connection_string() == "postgresql://u@db.example.com/managed"
+    def test_repo_env_when_dotenv_config_path_is_unset(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        (tmp_path / ".env").write_text("# local\nDATABASE_URL=postgresql://localhost/repo_env\n")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u@other.example.com/from_env")
+        assert ip.resolve_connection_string() == "postgresql://localhost/repo_env"
 
-    def test_repo_env_when_nothing_else(self, tmp_path: Path) -> None:
-        (tmp_path / ".env").write_text("# local\nDATABASE_URL=postgresql://localhost/local\n")
-        assert ip.resolve_connection_string() == "postgresql://localhost/local"
+    def test_env_supabase_is_not_consulted(self, tmp_path: Path) -> None:
+        (tmp_path / ".env.supabase").write_text("DATABASE_URL=postgresql://u@managed.example.com/m\n")
+        assert ip.resolve_connection_string() is None
+
+    def test_environment_is_the_fallback_when_the_file_has_no_url(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("DOTENV_CONFIG_PATH", str(tmp_path / "missing.env"))
+        monkeypatch.setenv("DATABASE_URL", "postgresql://127.0.0.1/local")
+        assert ip.resolve_connection_string() == "postgresql://127.0.0.1/local"
 
     def test_none_when_nothing_is_configured(self) -> None:
         assert ip.resolve_connection_string() is None

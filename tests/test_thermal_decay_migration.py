@@ -4,7 +4,7 @@
 The decay contract lives in two hand-written copies: ``src/config.ts`` holds the
 constants, and a ``drizzle/*.sql`` migration holds the query that uses them.
 Before 0010 existed, the query lived ONLY as a live row in ``cron.job`` on
-Supabase — in no migration and no script — so a ``config.ts`` edit could
+the managed instance — in no migration and no script — so a ``config.ts`` edit could
 silently diverge from what actually ran nightly.
 
 The function body has been superseded repeatedly (0010 → 0013 → 0014 → 0015),
@@ -26,6 +26,8 @@ This guard fails when one copy moves without the other. It mirrors the existing
 
 import re
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 # Matches both the original CREATE FUNCTION and every CREATE OR REPLACE that
@@ -83,24 +85,39 @@ MIGRATION_0012 = REPO / "drizzle" / "0012_thermal_cutoffs.sql"
 CONFIG = REPO / "src" / "config.ts"
 THERMAL_TS = REPO / "src" / "thermal.ts"
 
-PLAIN_CONSTANTS = (
-    "DECAY_RATE",
-    "DECAY_THRESHOLD_HOURS",
-    "PATTERN_THRESHOLD_BITS",
-    "PATTERN_MULTIPLIER_PER_BIT",
-    "IMPORTANCE_DRIFT_UP",
-    "IMPORTANCE_DRIFT_DOWN",
-    "IMPORTANCE_DRIFT_ACCESS_MIN",
-    "IMPORTANCE_DRIFT_NEGLECT_DAYS",
-    "IMPORTANCE_CAP",
-    "IMPORTANCE_FLOOR",
-    "TIER_HOT",
-    "TIER_WARM",
-    "STALE_THRESHOLD_DAYS",
-    "HOT_QUANTILE",
-    "WARM_QUANTILE",
-    "TEMPERATURE_FLOOR_EPSILON",
-)
+# Each constant is pinned to the SQL EXPRESSION it appears in, not to its bare
+# value. A bare-value check is close to vacuous here: "3", "5", "0.05" and "0.1"
+# occur many times elsewhere in the function (comments included), so a
+# substring guard reports green while the maths has actually drifted. `{v}` is
+# substituted with the value read from src/config.ts; matching runs on the SQL
+# with comment lines removed.
+CONSTANT_EXPRESSIONS = {
+    "DECAY_RATE": r"ELSE {v}::real",
+    "DECAY_THRESHOLD_HOURS": r"INTERVAL '1 hour' \* {v}\b",
+    "PATTERN_THRESHOLD_BITS": r">= {v}::real",
+    "PATTERN_MULTIPLIER_PER_BIT": r"\* {v}::real",
+    "IMPORTANCE_DRIFT_UP": r"e\.importance \+ {v}::real",
+    "IMPORTANCE_DRIFT_DOWN": r"e\.importance - {v}::real",
+    "IMPORTANCE_DRIFT_ACCESS_MIN": r"e\.access_count >= {v}\b",
+    "IMPORTANCE_DRIFT_NEGLECT_DAYS": r"INTERVAL '1 day' \* {v}\b",
+    "IMPORTANCE_CAP": r"LEAST\({v}::real",
+    "IMPORTANCE_FLOOR": r"GREATEST\({v}::real",
+    # The seeds are the fallback cutoffs written when no measured band exists.
+    "TIER_HOT": r"THEN {v}::real ELSE b\.min_hot\b",
+    "TIER_WARM": r"THEN {v}::real ELSE b\.min_warm\b",
+    "HOT_QUANTILE": r"ranked\.pr >= {v}::real THEN 'HOT'",
+    "WARM_QUANTILE": r"ranked\.pr >= {v}::real THEN 'WARM'",
+    "STALE_THRESHOLD_DAYS": r"INTERVAL '1 day' \* {v}\b",
+    "TEMPERATURE_FLOOR_EPSILON": r"e\.temperature < {v}::real THEN 0\.0::real",
+}
+
+
+def _sql_without_comments() -> str:
+    """Strip `--` comment lines so prose can never satisfy a constant assertion."""
+    return "\n".join(
+        line for line in MIGRATION.read_text().splitlines()
+        if not line.lstrip().startswith("--")
+    )
 
 
 def _const(name: str) -> str:
@@ -137,22 +154,28 @@ def test_migration_is_the_last_definer():
     )
 
 
-def test_plain_constants_appear_in_migration():
-    """Every constant the decay query uses must be present verbatim in the SQL."""
-    sql = MIGRATION.read_text()
-    missing = [f"{n} = {_const(n)}" for n in PLAIN_CONSTANTS if _const(n) not in sql]
-    assert not missing, f"constants missing from migration: {missing}"
+@pytest.mark.parametrize("name", sorted(CONSTANT_EXPRESSIONS))
+def test_constant_appears_in_its_sql_expression(name: str):
+    """Each constant must sit in the expression that uses it, not just anywhere."""
+    value = re.escape(_const(name))
+    pattern = CONSTANT_EXPRESSIONS[name].replace("{v}", value)
+    assert re.search(pattern, _sql_without_comments()), (
+        f"{name} = {_const(name)} not found in its expression /{pattern}/ in {MIGRATION.name}"
+    )
 
 
 def test_encoded_pattern_multiplier_base():
     """The migration encodes PATTERN_MULTIPLIER_BASE - 1.0, not the raw value.
 
-    config.ts says 1.1; the SQL says 0.1. A naive substring check would miss
-    this, so it gets its own assertion.
+    config.ts says 1.1; the SQL says 0.1. Anchored to the exact line it sits on,
+    because IMPORTANCE_FLOOR is ALSO 0.1 — a bare `"0.1" in sql` check passes on
+    that unrelated constant and would never notice this one going wrong.
     """
     encoded = round(float(_const("PATTERN_MULTIPLIER_BASE")) - 1.0, 10)
-    assert str(encoded) in MIGRATION.read_text(), (
-        f"PATTERN_MULTIPLIER_BASE - 1.0 = {encoded} missing from migration"
+    pattern = rf"^\s+{re.escape(str(encoded))}::real$"
+    assert re.search(pattern, _sql_without_comments(), re.M), (
+        f"PATTERN_MULTIPLIER_BASE - 1.0 = {encoded} missing from the migration "
+        f"as a standalone /{pattern}/ term"
     )
 
 
@@ -195,6 +218,10 @@ def test_migration_is_idempotent_by_construction():
         "schedule must be guarded by an unschedule so re-application cannot "
         "leave two jobs on pg_cron < 1.4"
     )
+    assert "AND database = current_database()" in schedule_sql, (
+        "cron.job is cluster-wide, so an unscoped unschedule applied in a second "
+        "database tears down the first database's job"
+    )
 
 
 def test_decay_all_delegates_and_keeps_no_second_copy():
@@ -210,7 +237,7 @@ def test_returned_columns_match_what_decay_all_reads():
     """The RETURNS TABLE column names are the contract decayAll consumes."""
     sql = MIGRATION.read_text()
     for col in ("id", "name", "type", "observations", "temperature",
-                "tier", "source", "importance", "access_count"):
+                "tier", "source", "importance", "access_count", "origin_host"):
         assert re.search(rf"^\s+{col}\s+\w", sql, re.M), (
             f"RETURNS TABLE is missing the {col} column decayAll reads"
         )

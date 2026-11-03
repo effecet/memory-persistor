@@ -26,7 +26,7 @@ import * as dotenv from 'dotenv';
 const repoRoot = resolve(__dirname, '..');
 
 describe('env loading invariants', () => {
-  it.each(['src/mcp-server.ts', 'src/mcp-tools.ts'])(
+  it.each(['src/mcp-server.ts', 'src/mcp-tools.ts', 'src/mcp-resources.ts', 'src/mcp-prompts.ts'])(
     '%s must not import dotenv/config (lets db.ts own env loading)',
     (rel) => {
       const src = readFileSync(join(repoRoot, rel), 'utf8');

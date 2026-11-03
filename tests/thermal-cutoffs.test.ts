@@ -26,7 +26,7 @@ describe('resolveCutoffs', () => {
 
   it('falls back to seeds when hot <= warm (degenerate distribution)', () => {
     // warmCutoff must stay ABOVE 0 here. The fixture used to be 0.0/0.0, which
-    // the the cold-pole fix `warm <= 0` arm now rejects FIRST — leaving this branch with no
+    // the cold-pole fix `warm <= 0` arm now rejects FIRST — leaving this branch with no
     // coverage at all while the test still passed. Hardening one check blinded
     // the one beside it.
     const degenerate = { ...fresh, hotCutoff: 0.1, warmCutoff: 0.2 };

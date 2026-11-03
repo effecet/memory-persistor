@@ -6,7 +6,8 @@ Review the pending work queue and clear out what is finished.
 
 It reads and writes the `pending` table through the memory-persistor MCP server.
 
-1. Call `mcp__memory-persistor__pending_list` with `status: "open"` and `limit: 50`.
+1. Call `mcp__memory-persistor__pending_list` with `status: "open"`, `limit: 50` and
+   `allHosts: true`, so items scoped to other machines are reviewed too.
 2. Present the items grouped by priority, one line each: `[priority] title (id-prefix)`.
 3. For each item, judge from the current repo state and this session's context
    whether it is already done. Do NOT guess — if you cannot tell, leave it open.
@@ -17,8 +18,7 @@ It reads and writes the `pending` table through the memory-persistor MCP server.
    a prompt for a decision, not evidence. Items that need only a decision
    (pick an option, confirm a project is dormant) go to the user as direct
    questions — that round alone often closes a large share of the queue.
-4. Present the proposed resolutions as a single batch and wait for approval,
-   per `rules/operations.md` § Proposal Gate:
+4. Present the proposed resolutions as a single batch and wait for approval:
 
    ```
    📋 Proposed: resolve N pending items
@@ -28,8 +28,9 @@ It reads and writes the `pending` table through the memory-persistor MCP server.
    Proceed? [yes / no / modify]
    ```
 5. On approval, call `mcp__memory-persistor__pending_resolve` once per approved
-   item, passing a one-line `resolution` explaining what closed it.
+   item, passing a one-line `resolution` explaining what closed it, and
+   `status: "archived"` for an item the user chose to drop rather than finish.
 6. Report the new open count.
 
 Never resolve an item the user did not approve. Never delete rows — `pending_resolve`
-sets `status='done'`, which is reversible.
+only flips `status`, which is reversible.

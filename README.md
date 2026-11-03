@@ -76,7 +76,7 @@ The server exposes 18 tools, 6 resources and 1 prompt via the Model Context Prot
 
 **Toolsets.** Set `MEMORY_PERSISTOR_TOOLSETS` (comma-separated: `core`, `maintenance`, `queue`, or `all`) to register only some tools — `core` gives the 9 read/write tools. Unset means all 18. An unknown name warns on stderr; a value naming only unknown sets falls back to every tool. A prompt is offered only when its tools are. Resources are always exposed, so `status`, `graph`, the queue and entity bodies stay readable whatever is set. Toolsets narrow what a model chooses among — they are not access control.
 
-**Error contract.** A failed tool call returns `isError: true` with a JSON body `{error, errorCategory, isRetryable}`. `errorCategory` is one of `validation`, `business`, `permission`, `transient` or `internal`, and `isRetryable` is true only for `transient`. A call that succeeded but had a non-fatal step fail (an embedding, an auto-relate) still succeeds and reports the step in `warnings`.
+**Error contract.** A failed tool call returns `isError: true` with a JSON body `{error, errorCategory, isRetryable}`. `errorCategory` is one of `validation`, `business`, `permission`, `transient` or `internal`, and `isRetryable` is true only for `transient`. A call that succeeded but had a non-fatal step fail (an embedding, an auto-relate) still succeeds and reports the step in `warnings`. An unknown or deleted memory id is a `validation` error; an unknown or already-closed queue item is `business`. `permission` is reserved and not currently returned.
 
 ### MCP Resources
 
@@ -372,15 +372,18 @@ snapshot of a real memory database is someone's memories. Without one, both scri
 a skip line and exit 0, and the fixture-bound tests skip with that reason. To guard your
 own deployment:
 
-1. `make ranking-snapshot` — snapshot a slice of your database (read-only on the source)
+1. Write `tests/fixtures/golden-queries.json`: queries with `expect_top` /
+   `expect_not_top` memory names and a `source` note for each. The snapshot reads it
+   to make sure every named memory is included.
+2. `make ranking-snapshot` — snapshot a slice of your database (read-only on the source)
    into `tests/fixtures/golden-corpus.json`. `DOTENV_CONFIG_PATH` picks the database,
    default `.env`.
-2. Write `tests/fixtures/golden-queries.json`: queries with `expect_top` /
-   `expect_not_top` memory names and a `source` note for each.
-3. `make ranking-baseline`, then review the baseline diff before committing.
-4. `make ranking-guard` from then on (CI runs it too).
+3. `make ranking-baseline`, then review `tests/fixtures/golden-baseline.json`.
+4. `make ranking-guard` before a change that touches scoring, tiers or the graph.
 
-Keep those fixtures out of a public fork.
+All three fixtures are in `.gitignore`, because they are a copy of your memories. Keep
+them out of any public fork; CI's ranking-guard step only does work in a private clone
+that force-adds them.
 
 > **`make test-integration` refuses a non-local database.** The suite issues
 > unconditional, table-wide `DELETE`s, so `tests/integration/db-guard.ts` requires
@@ -448,6 +451,36 @@ initdb/
 docker-compose.yml    # Local Postgres 16 + pg_cron + pg_trgm + pgvector
 LICENSE               # MIT
 ```
+
+## Upgrading an existing install
+
+`make migrate` is for a fresh database only. On an existing one, apply the new
+migrations by hand, in order, before starting the new server:
+
+```bash
+for f in drizzle/001[1-7]_*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
+```
+
+The new code needs those columns (`pending.applies_to`, `memory_relations.provenance`,
+`entities.temperature_rank`) and the `thermal_cutoffs` table. Without them `remember` and
+`relate` fail with an `internal` error. Existing pending rows become fleet-wide, so nothing is
+hidden. Existing edges become `inferred`, except those matching a recorded `relate` event,
+which become `asserted`; inferred edges count half in graph centrality, so ranking shifts
+where most edges came from auto-relate. `0017` keeps one row per edge (preferring the
+asserted, then the heavier, then the oldest) before adding its unique index; an older server that repeats a `relate`
+afterwards gets a unique-violation error instead of a second row.
+
+Behaviour a client may notice:
+
+- `forget` and `update` on an unknown id, and `update` with nothing to change, now return an
+  error result (`isError: true`, category `validation`) instead of a normal result with
+  `success: false`.
+- `remember` and `update` reject a name that looks like a filename stem
+  (`feedback_some_rule`); use a human-readable title.
+- Repeating a `relate` returns the existing edge with `existing: true` instead of adding a row.
+- `pending_list` shows this host's items by default; pass `allHosts: true` for everything.
+- Recall scoring is `relevance × (1 + α·prior)`, so result order shifts, and tiers are
+  percentile-based after the first nightly decay.
 
 ## Configuration
 

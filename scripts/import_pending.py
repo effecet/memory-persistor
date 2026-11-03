@@ -37,7 +37,7 @@ CATEGORY_RE = re.compile(r"^\*\*Category:\*\*\s*(.+?)\s*$", re.M)
 PRIORITY_RE = re.compile(r"^\*\*Priority:\*\*\s*(.+?)\s*$", re.M)
 ARCHIVED_DATE_RE = re.compile(r"<!--\s*ARCHIVED\s+(\d{4}-\d{2}-\d{2})")
 # The parenthetical that follows the archive date — "(resolved in commit
-# 89113ea)", "(an earlier issue closed 2026-04-27)". re.S because 2 of the 17
+# a1b2c3d)", "(an earlier issue closed 2026-04-27)". re.S because some
 # real headers wrap their parenthetical across physical lines.
 ARCHIVED_PROSE_RE = re.compile(
     r"<!--\s*ARCHIVED\s+\d{4}-\d{2}-\d{2}\s*\(([^)]*)\)", re.S
@@ -46,9 +46,9 @@ ARCHIVED_PROSE_RE = re.compile(
 VALID_CATEGORIES = {"skill", "rule", "automation", "knowledge"}
 VALID_PRIORITIES = {"low", "medium", "high"}
 
-# Legacy-data normalization. pending.md was hand-written over five months and
-# drifted from its own documented format; these are the exact drifts present,
-# audited 2026-08-07. This is a one-shot importer — it runs once, against this
+# Legacy-data normalization. A hand-written pending.md drifts from its own
+# documented format; these handle the drifts seen in practice.
+# This is a one-shot importer — it runs once, against this
 # one file, and is never a general-purpose parser.
 FALLBACK_CATEGORY = "knowledge"
 FALLBACK_PRIORITY = "low"
@@ -191,9 +191,9 @@ def _block_preamble(inner: str) -> str:
     The `ARCHIVED <date> (resolved...)` header is kept verbatim rather than
     stripped as metadata. Two reasons: it is the single most useful sentence on
     an archived row (it records how the item was resolved), and it is not
-    reliably one line — 2 of the 4 real blocks wrap their header parenthetical
+    reliably one line — some real blocks wrap their header parenthetical
     across two or three physical lines, so any line-based strip leaves garbled
-    fragments like 'accumulated permission grants):' behind.
+    fragments like 'generated output files):' behind.
     """
     first = ENTRY_SPLIT_RE.search(inner)
     if not first:
@@ -211,7 +211,7 @@ def parse_archived_blocks(blocks: list[str]) -> list[PendingEntry]:
     A block that wraps entries may ALSO carry resolution context before the
     first `## [date]` header. `parse_entries` only sees text *after* a header,
     so that context would be silently dropped — it is prepended to the first
-    nested entry's body instead. Four of the seventeen real blocks carry such
+    nested entry's body instead. Some real blocks carry such
     context (up to 1.7 kB, including a full failure diagnosis).
     """
     rows: list[PendingEntry] = []
@@ -227,9 +227,8 @@ def parse_archived_blocks(blocks: list[str]) -> list[PendingEntry]:
                 nested[0].body = f"{preamble}\n\n{nested[0].body}".strip()
             # Every nested entry gets the block's date and resolution, not just
             # the first — _block_preamble only ever reaches nested[0].
-            # Defensive, not corrective, on the 2026-08-07 corpus: measured
-            # 2026-08-08, all 17 real blocks yield at most one entry (15 with
-            # one nested entry, 2 note-only). The loop keeps a hand-edited
+            # Defensive, not corrective: in practice an archived block holds
+            # at most one entry. The loop keeps a hand-edited
             # multi-entry block from silently losing its resolution later.
             for entry in nested:
                 entry.resolved_at = archived_on
@@ -265,7 +264,7 @@ def _block_archived_on(block: str) -> date:
 def _block_resolution(block: str, archived_on: date) -> str:
     """One-line resolution for an ARCHIVED block.
 
-    Prefers the header's parenthetical — "resolved in commit 89113ea" — collapsed
+    Prefers the header's parenthetical — "resolved in commit a1b2c3d" — collapsed
     to a single line, since real headers wrap across two or three physical lines.
     Falls back to the bare date rather than None: we know for certain the row was
     deliberately archived, so an empty resolution would understate what we know.
@@ -373,22 +372,18 @@ def _read_database_url(path: Path) -> str | None:
 def resolve_connection_string() -> str | None:
     """Resolve the Postgres URL the MCP server would use.
 
-    Order: a non-localhost DATABASE_URL env -> the DOTENV_CONFIG_PATH file ->
-    the repo's .env.supabase -> the repo's .env -> None.
+    Mirrors src/db.ts: the DOTENV_CONFIG_PATH file (else the repo's .env) is
+    loaded with override, so its DATABASE_URL wins over the environment; the
+    environment's DATABASE_URL is the fallback. Nothing else is consulted, so
+    a managed-database file such as .env.supabase is only used when
+    DOTENV_CONFIG_PATH names it.
     """
-    env_url = os.environ.get("DATABASE_URL", "")
-    if env_url and "localhost" not in env_url and "127.0.0.1" not in env_url:
-        return env_url
     dotenv_path = os.environ.get("DOTENV_CONFIG_PATH")
-    if dotenv_path:
-        url = _read_database_url(Path(dotenv_path).expanduser())
-        if url:
-            return url
-    for fname in (".env.supabase", ".env"):
-        url = _read_database_url(REPO_DIR / fname)
-        if url:
-            return url
-    return None
+    path = Path(dotenv_path).expanduser() if dotenv_path else REPO_DIR / ".env"
+    url = _read_database_url(path)
+    if url:
+        return url
+    return os.environ.get("DATABASE_URL", "").strip() or None
 
 
 def redact_dsn(dsn: str) -> str:
@@ -408,18 +403,17 @@ def _explicit_target(args: argparse.Namespace) -> tuple[str | None, str]:
 
     Returns (connection_string, how). `how` is '' when the operator gave no
     explicit target at all — main() must then refuse to write, since
-    auto-resolution alone (walking to .env.supabase / .env) is exactly the
-    mechanism that silently picked the wrong database (Critical 1).
+    auto-resolution alone (walking dotenv files) is exactly the mechanism
+    that silently picks the wrong database.
 
-    Three ways to opt in, checked in order:
-      1. --dsn <url>                 — wins outright
-      2. DATABASE_URL env var        — explicit by construction
-      3. --i-know-the-target         — operator confirms the auto-resolved
-         value (from resolve_connection_string(), the same walk the MCP server's config uses)
-         is the one they intend
+    Two ways to opt in, checked in order. There is deliberately no flag that
+    takes a connection string: argv is readable by every user on the host
+    (/proc/<pid>/cmdline) and lands in shell history.
+      1. DATABASE_URL env var        — explicit by construction
+      2. --i-know-the-target         — operator confirms the auto-resolved
+         value (resolve_connection_string(), the database the MCP server
+         would use) is the one they intend
     """
-    if args.dsn:
-        return args.dsn, "--dsn"
     env_dsn = os.environ.get("DATABASE_URL", "").strip()
     if env_dsn:
         return env_dsn, "DATABASE_URL env var"
@@ -473,19 +467,12 @@ def main() -> int:
     parser.add_argument("--cutoff-days", type=int, default=DEFAULT_CUTOFF_DAYS)
     parser.add_argument("--apply", action="store_true", help="Actually write to Postgres")
     parser.add_argument(
-        "--dsn",
-        type=str,
-        default=None,
-        help="Explicit Postgres connection string for --apply; wins over auto-resolution",
-    )
-    parser.add_argument(
         "--i-know-the-target",
         action="store_true",
         dest="i_know_the_target",
         help=(
-            "Confirm the auto-resolved DATABASE_URL (same walk as the MCP server's config) is the "
-            "intended --apply target. Required only when --dsn and DATABASE_URL are "
-            "both absent."
+            "Confirm the auto-resolved database (the one the MCP server would use) is the "
+            "intended --apply target. Required only when DATABASE_URL is not set."
         ),
     )
     parser.add_argument(
@@ -530,7 +517,7 @@ def main() -> int:
         print("\nRefusing to --apply: no explicit target given.", file=sys.stderr)
         print(f"Auto-resolution would have used: {auto_desc}", file=sys.stderr)
         print(
-            "Pass --dsn <connection-string>, set DATABASE_URL, or pass "
+            "Set DATABASE_URL, or pass "
             "--i-know-the-target to confirm the auto-resolved target above is correct.",
             file=sys.stderr,
         )

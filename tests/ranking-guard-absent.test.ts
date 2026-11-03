@@ -17,7 +17,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURES = join(REPO, 'tests', 'fixtures');
-const ABSENT = !existsSync(join(FIXTURES, 'golden-corpus.json')) && !existsSync(join(FIXTURES, 'golden-queries.json'));
+const NO_CORPUS = !existsSync(join(FIXTURES, 'golden-corpus.json'));
+const NO_QUERIES = !existsSync(join(FIXTURES, 'golden-queries.json'));
 
 function run(script: string): { status: number | null; stdout: string; stderr: string } {
   const emptyEnv = join(mkdtempSync(join(tmpdir(), 'mp-guard-absent-')), 'empty.env');
@@ -33,15 +34,15 @@ function run(script: string): { status: number | null; stdout: string; stderr: s
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
-describe.skipIf(!ABSENT)('without a golden corpus (none ships with this repo)', () => {
-  it('ranking-guard exits 0 with a skip line', () => {
+describe('without golden fixtures (none ship with this repo)', () => {
+  it.skipIf(!NO_CORPUS)('ranking-guard exits 0 with a skip line when the corpus is absent', () => {
     const r = run('ranking-guard.ts');
     expect(r.stderr).not.toMatch(/ENOENT/);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('golden corpus not present — skipping (see README § Ranking guard)');
   });
 
-  it('score-benchmark exits 0 with a skip line', () => {
+  it.skipIf(!NO_QUERIES)('score-benchmark exits 0 with a skip line when the queries are absent', () => {
     const r = run('score-benchmark.ts');
     expect(r.stderr).not.toMatch(/ENOENT/);
     expect(r.status).toBe(0);

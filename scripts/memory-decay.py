@@ -35,11 +35,10 @@ def get_database_url() -> str:
     """Resolve DATABASE_URL targeting the SAME DB the MCP uses.
 
     Order: non-localhost DATABASE_URL env -> DOTENV_CONFIG_PATH file (the MCP's
-    own env selector) -> .env.supabase (shared cloud brain) -> .env (local
-    Docker). Honoring DOTENV_CONFIG_PATH / .env.supabase is the whole fix:
-    decay must run against the live Supabase brain, not the local Docker copy
-    (which has been down since ~2026-05-25, so decay silently no-op'd and
-    nothing ever cooled). For an explicit local run, set DOTENV_CONFIG_PATH=.env.
+    own env selector) -> .env.supabase (managed database) -> .env (local
+    Docker). Honoring DOTENV_CONFIG_PATH / .env.supabase matters when the real
+    corpus lives on a managed database: decaying an idle local copy instead
+    is a silent no-op. For an explicit local run, set DOTENV_CONFIG_PATH=.env.
     """
     env_url = os.environ.get("DATABASE_URL")
     if env_url and "localhost" not in env_url and "127.0.0.1" not in env_url:

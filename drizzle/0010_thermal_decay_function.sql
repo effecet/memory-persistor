@@ -17,14 +17,13 @@
 --      inline copy is what runs.
 --   2. `public.decay_catchup()` in the same file mirrors the decay SQL inline
 --      for its `@reboot` catch-up pass and is NOT replaced by this migration.
---   3. `scripts/memory-decay.py` (the `make decay` path) carries a THIRD inline
---      copy that has ALREADY DRIFTED: it applies a flat `temperature * 0.85`
---      with no access_bitmap pattern term and no importance drift, i.e. the
---      pre-v3 model. Treat `make decay` as legacy until it is repointed at this
---      function.
--- tests/test_thermal_decay_migration.py pins THIS file against src/config.ts
--- and nothing else, so a change to the decay maths must still be applied to
--- initdb/01-pg-cron.sql and scripts/memory-decay.py by hand.
+--      It still assigns tiers from the fixed 0.7 / 0.3 thresholds, so after a
+--      container restart following a gap of more than 24h it overwrites the
+--      percentile tiers (0013+) until the next scheduled decay.
+-- `scripts/memory-decay.py` (`make decay`) calls this function and keeps no
+-- copy of its own. tests/test_thermal_decay_migration.py pins the LAST
+-- migration that defines the function against src/config.ts, so a change to
+-- the decay maths must still be applied to initdb/01-pg-cron.sql by hand.
 --
 -- Constants below are duplicated from src/config.ts and pinned by
 -- tests/test_thermal_decay_migration.py. Note that 0.1 encodes

@@ -44,7 +44,7 @@ jobs:
 
       - name: Python tests (scripts)
         run: |
-          pip install pytest httpx respx python-dotenv
+          pip install pytest
           pytest tests/ --ignore=tests/integration -q
 
       - name: Gitleaks

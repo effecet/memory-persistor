@@ -94,8 +94,7 @@ describe('normalizeHost', () => {
     }
   });
 
-  it('keeps the two hostnames actually present in the table distinct', () => {
-    // Measured 2026-09-07: pending.origin_host is Laptop-A (160) and server-b (27).
+  it('keeps two different hostnames distinct', () => {
     expect(normalizeHost('Laptop-A')).not.toBe(normalizeHost('server-b'));
   });
 });
@@ -188,7 +187,7 @@ describe('normalizeHost strips to the SQL-safe alphabet', () => {
     // tests/test_host_normalization_parity.py runs BOTH implementations and
     // compares; these pin the TS side so a change here fails fast too.
     expect(normalizeHost('LAPTOP A')).toBe('laptopa');
-    expect(normalizeHost("Fede's MacBook Pro")).toBe('fedesmacbookpro');
+    expect(normalizeHost("Jane's MacBook Pro")).toBe('janesmacbookpro');
     expect(normalizeHost('...')).toBe('');
   });
 });

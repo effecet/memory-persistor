@@ -4,7 +4,7 @@
  * same way from src/ (tsx, tests) and dist/ (the built server).
  */
 import { describe, it, expect } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -51,6 +51,32 @@ describe('prompt registration', () => {
     mkdirSync(join(root, 'prompts'));
     writeFileSync(join(root, PROMPT_SOURCES.clear_pending), '# Clear\n');
     await expect(promptNames(registerPrompts, root)).resolves.toEqual(['clear_pending']);
+  });
+
+  it('a prompt whose file disappears after registration fails cleanly, without the absolute path', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mp-prompts-gone-'));
+    mkdirSync(join(root, 'prompts'));
+    writeFileSync(join(root, PROMPT_SOURCES.clear_pending), '# Clear\n');
+    const server = new McpServer({ name: 'prompt-test', version: '0.0.0' });
+    registerPrompts(server, ALL_TOOLS, root);
+    const [c, s] = InMemoryTransport.createLinkedPair();
+    await server.connect(s);
+    const client = new Client({ name: 'prompt-test-client', version: '0.0.0' });
+    await client.connect(c);
+    try {
+      rmSync(join(root, PROMPT_SOURCES.clear_pending));
+      const err = await client.getPrompt({ name: 'clear_pending', arguments: {} }).then(
+        () => null,
+        (e: unknown) => e as { code?: number; message?: string },
+      );
+      expect(err).not.toBeNull();
+      expect(err!.code).toBe(-32603); // InternalError
+      expect(err!.message).toContain('prompts/clear-pending.md is unreadable (ENOENT)');
+      expect(err!.message).not.toContain(root);
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 
   it('resolves the repo root from both src/ and the built dist/', async () => {

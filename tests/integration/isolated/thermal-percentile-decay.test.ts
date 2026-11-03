@@ -296,7 +296,7 @@ describe('memory_thermal_decay percentile tiers', () => {
     expect(Number((bands.rows[0] as { hot: string | number }).hot)).toBeGreaterThan(0);
     expect(Number((bands.rows[0] as { warm: string | number }).warm)).toBeGreaterThan(0);
 
-    // The WARM band's own minimum is non-zero — this is the the cold-pole fix property
+    // The WARM band's own minimum is non-zero — this is the cold-pole fix property
     // itself, read from the corpus rather than inferred from the cutoffs row.
     // Before the fix the floored mass WAS the WARM band, so this was exactly 0.
     const band = await testDb.execute(sql`

@@ -118,7 +118,7 @@ export const CENTRALITY_DENOM_EXPR: SQL = sql`COALESCE(NULLIF((
  * the long-lived local DEV database**. It changes nothing in CI: `make test-integration`
  * builds a fresh database, which has no decayed denormals, so the fault is unreachable
  * there and that suite was already green. (That file's failure count is also run-order
- * dependent — see the memory `recall integration failures are run-order dependent` — so
+ * dependent, so
  * treat 8/2 as one measurement, not a property.) The bug is real and production-only,
  * which is exactly why `tests/integration/scoring-bounds.test.ts` now INSERTS a denormal
  * row: without that fixture CI can never catch a regression here.
