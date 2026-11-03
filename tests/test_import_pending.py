@@ -806,6 +806,8 @@ class TestResolveConnectionString:
     def test_environment_is_the_fallback_when_the_file_has_no_url(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        # A repo .env must NOT be used instead: src/db.ts loads only the named file.
+        (tmp_path / ".env").write_text("DATABASE_URL=postgresql://localhost/repo_env\n")
         monkeypatch.setenv("DOTENV_CONFIG_PATH", str(tmp_path / "missing.env"))
         monkeypatch.setenv("DATABASE_URL", "postgresql://127.0.0.1/local")
         assert ip.resolve_connection_string() == "postgresql://127.0.0.1/local"

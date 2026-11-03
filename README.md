@@ -462,8 +462,9 @@ for f in drizzle/001[1-7]_*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "
 ```
 
 The new code needs those columns (`pending.applies_to`, `memory_relations.provenance`,
-`entities.temperature_rank`) and the `thermal_cutoffs` table. Without them `remember` and
-`relate` fail with an `internal` error. Existing pending rows become fleet-wide, so nothing is
+`entities.temperature_rank`) and the `thermal_cutoffs` table. Without them `recall`,
+`recall_by_ids`, `relate` and the `pending_*` tools fail with an `internal` error, and
+`remember` stores the memory but reports its edge steps in `warnings`. Existing pending rows become fleet-wide, so nothing is
 hidden. Existing edges become `inferred`, except those matching a recorded `relate` event,
 which become `asserted`; inferred edges count half in graph centrality, so ranking shifts
 where most edges came from auto-relate. `0017` keeps one row per edge (preferring the

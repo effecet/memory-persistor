@@ -372,9 +372,11 @@ def _read_database_url(path: Path) -> str | None:
 def resolve_connection_string() -> str | None:
     """Resolve the Postgres URL the MCP server would use.
 
-    Mirrors src/db.ts: the DOTENV_CONFIG_PATH file (else the repo's .env) is
-    loaded with override, so its DATABASE_URL wins over the environment; the
-    environment's DATABASE_URL is the fallback. Nothing else is consulted, so
+    Mirrors src/db.ts: the DOTENV_CONFIG_PATH file (else a .env) is loaded with
+    override, so its DATABASE_URL wins over the environment; the environment's
+    DATABASE_URL is the fallback. Without DOTENV_CONFIG_PATH this reads the
+    repo's .env, while the server reads the .env in its working directory; the
+    two agree when the server runs from the repo root, as `make dev` does. Nothing else is consulted, so
     a managed-database file such as .env.supabase is only used when
     DOTENV_CONFIG_PATH names it.
     """
