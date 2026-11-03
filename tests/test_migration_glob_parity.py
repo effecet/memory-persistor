@@ -2,11 +2,11 @@
 """Every migration loop must apply the SAME set of files.
 
 Five places apply the migrations in order: `make migrate` and the `reset_db`
-macro in the Makefile, and three steps in `.forgejo/workflows/integration.yml`
+macro in the Makefile, and three steps in `.github/workflows/ci.yml`
 (main test DB, thermal_isolated, ranking_guard).
 
 They must agree. When they do not, a migration lands in some databases and not
-others — a SUBSET-APPLIED migration, the same shape as the PR #47 drizzle-kit
+others — a SUBSET-APPLIED migration, the same shape as an earlier drizzle-kit
 incident: every table looks correct while a function is silently absent, and the
 failure surfaces far from its cause as "works in CI, fails locally".
 

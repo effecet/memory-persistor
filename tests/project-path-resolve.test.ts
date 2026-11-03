@@ -19,7 +19,7 @@ beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'resolve-'));
   for (const d of [
     'Users/foo.bar/Downloads/maple-leaf-fabric',
-    'Users/foo.bar/Downloads/music_visualizer',
+    'Users/foo.bar/Downloads/sample_project',
     'Users/foo.bar/.claude',
     'Users/foo.bar/proj',
     'amb/a-b',
@@ -52,8 +52,8 @@ describe('resolveProjectPath', () => {
   });
 
   it('keeps underscores, which the encoding never touches', () => {
-    expect(resolveProjectPath('-Users-foo-bar-Downloads-music_visualizer', root))
-      .toBe('/Users/foo.bar/Downloads/music_visualizer');
+    expect(resolveProjectPath('-Users-foo-bar-Downloads-sample_project', root))
+      .toBe('/Users/foo.bar/Downloads/sample_project');
   });
 
   it('resolves a dot-directory, which encodes as a double dash', () => {

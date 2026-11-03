@@ -152,7 +152,7 @@ def _read_expansion(text: str, i: int) -> tuple[str | None, str | None, int]:
     n = len(text)
     rest = text[i + 1 :]
 
-    # `${{ secrets.DATABASE_URL }}` — Forgejo/Actions expression syntax.
+    # `${{ secrets.DATABASE_URL }}` — Actions expression syntax.
     if rest.startswith("{{"):
         end = text.find("}}", i)
         if end == -1:
@@ -711,7 +711,7 @@ def test_yaml_env_mapping_is_not_mistaken_for_a_command():
     env_block = (
         "        env:\n"
         "          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_CI_TOKEN }}\n"
-        '          CHAT_ID: "1419804106"\n'
+        '          CHAT_ID: "100000000"\n'
     )
     assert not scan_text(env_block, is_yaml=True)
 
@@ -791,7 +791,7 @@ def test_allows_safe_shapes(line, is_make):
     [
         'test -n "$DB_URL"',  # Makefile:240 — the argv audit argues this is NOT a leak
         '[ -z "$TELEGRAM_TOKEN" ] && exit 0',  # lint-unit.yml:108
-        '[ "$ENV_TOKEN" != "$CJSON_TOKEN" ]',  # probe_mcp_codeberg_token.sh:47
+        '[ "$ENV_TOKEN" != "$CJSON_TOKEN" ]',  # a comparison, not a command
         'printf %s "$PGPASSWORD"',
         'export DATABASE_URL="$DATABASE_URL"',
     ],
@@ -811,7 +811,7 @@ def test_allows_builtin_call_split_across_continuation_lines():
     reflowed = (
         "printf 'header = \"Authorization: token %s\"\\n' \\\n"
         '    "$ENV_TOKEN" \\\n'
-        "    | curl -sS --config - https://codeberg.org/api/v1/user\n"
+        "    | curl -sS --config - https://git.example.org/api/v1/user\n"
     )
     assert not scan_text(reflowed, is_make=False), "reflowed builtin false-positived"
 
@@ -890,7 +890,7 @@ def test_apostrophe_in_a_comment_does_not_desynchronise_the_parser():
     script = (
         "# The header travels via curl's stdin config, never argv.\n"
         "printf 'header = \"Authorization: token %s\"\\n' \"$ENV_TOKEN\" \\\n"
-        "    | curl -sS --config - https://codeberg.org/api/v1/user\n"
+        "    | curl -sS --config - https://git.example.org/api/v1/user\n"
     )
     assert not scan_text(script, is_make=False)
 

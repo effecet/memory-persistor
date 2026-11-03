@@ -9,7 +9,7 @@
  * for every recall suite that ran next. Here it runs on a database it owns.
  *
  * Belt and braces on top of that: beforeAll refuses any database whose name
- * does not end in `_test` or `_isolated` — `effece_memory_isolated_test`
+ * does not end in `_test` or `_isolated` — `memory_persistor_isolated_test`
  * locally, `thermal_isolated` in CI (db-guard checks the HOST, so a bare
  * `npm run test:integration:isolated` against ./.env would otherwise reach the
  * local dev DB) — and every fault is undone in afterEach AND pre-emptively in

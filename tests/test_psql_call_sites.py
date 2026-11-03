@@ -5,10 +5,9 @@ callers USE it. A gate review on 2026-09-06 demonstrated the gap by reverting
 all eight non-`events_canary` call sites to put the raw DSN back in argv — the
 entire suite stayed green.
 
-That is this repo's recurring failure shape, not a hypothetical: the retired
-`memory_name_guard.py` fired on `remember` but never on `update`, so the corpus
-drifted in through the unguarded path; `codeberg_backup.py` collected zero
-instinct files for weeks while exiting clean.
+That is a recurring failure shape, not a hypothetical: a guard that fired on
+`remember` but never on `update` let the corpus drift in through the unguarded
+path, and a backup job collected zero files for weeks while exiting clean.
 
 So these tests DISCOVER their targets by walking the AST of every script rather
 than checking a hardcoded list — a list would silently omit call site #10, which
