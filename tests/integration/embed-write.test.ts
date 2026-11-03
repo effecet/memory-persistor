@@ -1,10 +1,10 @@
 /**
  * Integration tests for the entities.embedding column.
  * Proves the pgvector round-trip through Drizzle against the real Docker
- * Postgres instance — mcp-server.ts's remember/update handlers aren't unit
- * tested directly (matches this suite's existing convention of testing the
- * DB layer via helpers rather than the tool closures), so this is the layer
- * that actually proves "a written vector comes back intact".
+ * Postgres instance, at the DB layer via helpers. (The remember/update
+ * handlers themselves live in src/mcp-tools.ts and are reachable through a
+ * real client via tests/integration/mcp-harness.ts.) This is the layer that
+ * proves "a written vector comes back intact".
  */
 import { describe, it, expect, afterAll, afterEach } from 'vitest';
 import { eq } from 'drizzle-orm';

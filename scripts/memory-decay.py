@@ -3,7 +3,8 @@
 Memory decay + snapshot script.
 Run on session start or via cron to age out stale memories.
 
-1. Decays temperature on entities not accessed in 24h
+1. Runs public.memory_thermal_decay() — the versioned decay function
+   (this script does NOT define decay behaviour; drizzle/ owns it)
 2. Exports JSON snapshots to backups/
 3. Prunes to the last MAX_SNAPSHOTS snapshots
 """
@@ -16,8 +17,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-DECAY_RATE = 0.85
-DECAY_THRESHOLD_HOURS = 24
+_HOOKS = Path(__file__).resolve().parent  # psql_dsn.py lives beside this script
+if str(_HOOKS) not in sys.path:
+    sys.path.insert(0, str(_HOOKS))
+from psql_dsn import psql_env  # noqa: E402  (path-insert must precede import)
+
 MAX_SNAPSHOTS = 7  # keep ~1 week of DB snapshots; Postgres is the real safety net
 
 # Resolve paths
@@ -31,11 +35,10 @@ def get_database_url() -> str:
     """Resolve DATABASE_URL targeting the SAME DB the MCP uses.
 
     Order: non-localhost DATABASE_URL env -> DOTENV_CONFIG_PATH file (the MCP's
-    own env selector) -> .env.supabase (shared cloud brain) -> .env (local
-    Docker). Honoring DOTENV_CONFIG_PATH / .env.supabase is the whole fix:
-    decay must run against the live Supabase brain, not the local Docker copy
-    (which has been down since ~2026-05-25, so decay silently no-op'd and
-    nothing ever cooled). For an explicit local run, set DOTENV_CONFIG_PATH=.env.
+    own env selector) -> .env.supabase (managed database) -> .env (local
+    Docker). Honoring DOTENV_CONFIG_PATH / .env.supabase matters when the real
+    corpus lives on a managed database: decaying an idle local copy instead
+    is a silent no-op. For an explicit local run, set DOTENV_CONFIG_PATH=.env.
     """
     env_url = os.environ.get("DATABASE_URL")
     if env_url and "localhost" not in env_url and "127.0.0.1" not in env_url:
@@ -64,10 +67,10 @@ def get_database_url() -> str:
 def run_psql(query: str) -> str:
     """Execute a psql query via local psql or Docker container fallback."""
     if shutil.which("psql"):
-        database_url = get_database_url()
+        argv_dsn, env = psql_env(get_database_url())
         result = subprocess.run(
-            ["psql", database_url, "-t", "-A", "-c", query],
-            capture_output=True, text=True, timeout=30,
+            ["psql", argv_dsn, "-t", "-A", "-c", query],
+            capture_output=True, text=True, timeout=30, env=env,
         )
     else:
         result = subprocess.run(
@@ -83,25 +86,26 @@ def run_psql(query: str) -> str:
 
 
 def decay() -> int:
-    """Apply thermal decay to stale entities. Returns count of affected rows."""
-    query = f"""
-        UPDATE public.entities
-        SET
-            temperature = GREATEST(0.0, temperature * {DECAY_RATE}),
-            tier = CASE
-                WHEN GREATEST(0.0, temperature * {DECAY_RATE}) > 0.7 THEN 'HOT'
-                WHEN GREATEST(0.0, temperature * {DECAY_RATE}) > 0.3 THEN 'WARM'
-                ELSE 'COLD'
-            END
-        WHERE last_accessed_at < NOW() - INTERVAL '{DECAY_THRESHOLD_HOURS} hours';
+    """Run the versioned decay function. Returns the count of CHANGED rows.
+
+    Delegates to public.memory_thermal_decay() rather than carrying its own
+    query, so `make decay` and the nightly pg_cron job cannot diverge. They
+    had: this function held the pre-0010 logic — a flat decay rate with no
+    pattern-awareness, no floor, and tier written from absolute thresholds —
+    so after the switch to rank-assigned tiers, running it OVERWROTE correct
+    tiers with the old scheme across every row in the staleness window.
+
+    The returned number changed meaning with that delegation. It used to count
+    rows inside the staleness window whether or not anything about them moved;
+    it now counts rows the function reports as actually changed, which is a
+    subset and the more useful figure. `make decay` output will read lower.
+
+    Note this path does NOT sync markdown — psql cannot reach the filesystem,
+    the same property the pg_cron path has. decayAll() in src/thermal.ts is
+    the only caller that writes files.
     """
-    run_psql(query)
-    count_query = f"""
-        SELECT COUNT(*) FROM public.entities
-        WHERE last_accessed_at < NOW() - INTERVAL '{DECAY_THRESHOLD_HOURS} hours';
-    """
-    count_result = run_psql(count_query)
-    return int(count_result) if count_result else 0
+    result = run_psql("SELECT COUNT(*) FROM public.memory_thermal_decay();")
+    return int(result) if result else 0
 
 
 def export_snapshot() -> tuple[Path, Path]:
@@ -148,7 +152,7 @@ def prune_snapshots() -> int:
 
 def main() -> None:
     # 1. Decay
-    stale_count = decay()
+    changed_count = decay()
 
     # 2. Snapshot
     try:
@@ -161,7 +165,7 @@ def main() -> None:
     pruned = prune_snapshots()
 
     # Human-readable summary line (captured by the caller, if any)
-    parts = [f"🧊 Memory decay: {stale_count} entities cooled"]
+    parts = [f"🧊 Memory decay: {changed_count} entities changed"]
     if pruned:
         parts.append(f", {pruned} old snapshots pruned")
     parts.append(f" | {snapshot_msg}")

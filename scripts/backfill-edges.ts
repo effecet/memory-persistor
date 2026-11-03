@@ -10,9 +10,9 @@
  */
 import { db, closeDb } from '../src/db.js';
 import { sql } from 'drizzle-orm';
-import { recall } from '../src/retrieve.js';
+import { recall, shouldAutoRelate } from '../src/retrieve.js';
 import { memoryRelations } from '../src/schema.js';
-import { AUTO_RELATE_THRESHOLD, AUTO_RELATE_LIMIT } from '../src/config.js';
+import { AUTO_RELATE_LIMIT } from '../src/config.js';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -50,11 +50,15 @@ async function main(): Promise<void> {
     const query = `${entity.name} ${entity.observations.slice(0, 200)}`;
 
     try {
-      const matches = await recall({ query, limit: AUTO_RELATE_LIMIT });
+      // recall() returns a RecallResponse wrapper (since the recall-cap change), not an array.
+      // `for...of` over the wrapper threw TypeError at runtime and TS2488 under
+      // tsc -- invisible because tsconfig's include was ["src"], so scripts/ was
+      // never typechecked. See the typecheck-scripts npm script.
+      const { results: matches } = await recall({ query, limit: AUTO_RELATE_LIMIT });
 
       for (const match of matches) {
         if (match.id === entity.id) continue;
-        if (match.score < AUTO_RELATE_THRESHOLD) continue;
+        if (!shouldAutoRelate(match)) continue;
         if (existingEdges.has(`${entity.id}:${match.id}`)) {
           skipped++;
           continue;
@@ -63,14 +67,20 @@ async function main(): Promise<void> {
         if (DRY_RUN) {
           console.log(`  [dry-run] ${entity.name} -> ${match.name} (score: ${match.score.toFixed(3)})`);
         } else {
-          await db.insert(memoryRelations).values({
+          const inserted = await db.insert(memoryRelations).values({
             fromId: entity.id,
             toId: match.id,
             relationType: 'related_to',
-          });
+            // A similarity guess, same as remember's auto-relate.
+            provenance: 'inferred',
+          }).onConflictDoNothing().returning({ id: memoryRelations.id });
           // Track both directions to avoid duplicates within this run
           existingEdges.add(`${entity.id}:${match.id}`);
           existingEdges.add(`${match.id}:${entity.id}`);
+          if (inserted.length === 0) {
+            skipped++;
+            continue;
+          }
         }
         created++;
       }

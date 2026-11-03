@@ -36,6 +36,10 @@ try {
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import * as schema from './schema.js';
+// Deliberately NOT from './config.js' — config reads process.env at module
+// scope, and ESM evaluates this import BEFORE the dotenv.config() above, which
+// silently flips EMBED_ON_WRITE_ENABLED to false. See src/search-path.ts.
+import { SEARCH_PATH_OPTIONS } from './search-path.js';
 
 const { Pool } = pg;
 
@@ -58,8 +62,29 @@ function buildConnectionString(): string {
   return `${base}${sep}sslmode=require&uselibpqcompat=true`;
 }
 
+// `search_path` is pinned, NOT left to the server's defaults — without it every
+// recall against Supabase aborts with `42883 function word_similarity(...) does
+// not exist`, because Supavisor's pooled backends do not inherit the postgres
+// role's search_path and pg_trgm lives in the `extensions` schema there.
+// SEARCH_PATH_OPTIONS carries the full rationale, including why this
+// deliberately short-circuits PGOPTIONS.
+//
+// An `options=` inside DATABASE_URL DOES still beat the code value: pg does
+// `Object.assign({}, config, parse(connectionString))`, so the URL wins. That
+// path silently restores the exact 42883 failure this fix exists to remove, so
+// it is announced rather than left to be rediscovered from a wall of SQL.
+// stderr, never stdout — stdout is the MCP's JSON-RPC transport.
+if (/[?&]options=/.test(process.env.DATABASE_URL ?? '')) {
+  console.error(
+    '[db] WARNING: DATABASE_URL carries its own `options=`, which overrides ' +
+      `${SEARCH_PATH_OPTIONS}. If it omits the \`extensions\` schema, every ` +
+      'recall against Supabase will fail with 42883 (word_similarity not found).',
+  );
+}
+
 const pool = new Pool({
   connectionString: buildConnectionString(),
+  options: SEARCH_PATH_OPTIONS,
 });
 
 export const db = drizzle(pool, { schema });

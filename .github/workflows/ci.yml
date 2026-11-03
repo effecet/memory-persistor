@@ -45,7 +45,7 @@ jobs:
       - name: Python tests (scripts)
         run: |
           pip install pytest
-          pytest tests/ -q || [ $? -eq 5 ]   # exit 5 = no tests collected, that's fine
+          pytest tests/ --ignore=tests/integration -q
 
       - name: Gitleaks
         run: |
@@ -54,3 +54,109 @@ jobs:
           CONFIG_ARGS=""
           [ -f .gitleaks.toml ] && CONFIG_ARGS="--config .gitleaks.toml"
           gitleaks detect $CONFIG_ARGS --source . --redact --exit-code 1 --verbose
+
+  integration:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: memory_persistor_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/memory_persistor_test
+      NODE_ENV: test
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create pg_trgm + vector extensions
+        run: psql -v ON_ERROR_STOP=1 -d memory_persistor_test -c "CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS vector;"
+
+      # Not drizzle-kit: drizzle/meta/ is gitignored, so `generate` would emit a
+      # from-scratch schema and skip every hand-written migration (extensions,
+      # indexes, the decay function). Apply the files in order instead.
+      - name: Apply hand-written migrations
+        run: |
+          set -euo pipefail
+          for f in drizzle/*.sql; do
+            echo "applying $f"
+            psql -v ON_ERROR_STOP=1 -d memory_persistor_test -q -f "$f"
+          done
+
+      # thermal-lookup.test.ts spawns a subprocess with DATABASE_URL unset, to
+      # prove db.ts resolves it through DOTENV_CONFIG_PATH. A CI checkout has no
+      # .env, so the file has to exist for that case to test what it means to.
+      - name: Write throwaway dotenv for the clean-environment subprocess case
+        run: printf 'DATABASE_URL=postgres://postgres:postgres@localhost:5432/memory_persistor_test\n' > ci.env
+
+      - name: Pre-cache embedding model (bge-small, fp32)
+        run: node --import tsx scripts/precache-embed-model.ts
+
+      - name: Vitest integration suite
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/memory_persistor_test
+          # helpers.ts and db.ts both re-read this with override: true; it names
+          # the same database, so the guard and the code under test agree.
+          DOTENV_CONFIG_PATH: ci.env
+        run: npm run test:integration
+
+      # The thermal suite calls the corpus-wide memory_thermal_decay() and
+      # writes the single-row thermal_cutoffs table, so it gets a database of
+      # its own. tests/test_thermal_test_isolation.py keeps the split honest.
+      - name: Create isolated thermal database
+        run: |
+          set -e
+          psql -d memory_persistor_test -c "CREATE DATABASE thermal_isolated;"
+          psql -v ON_ERROR_STOP=1 -d thermal_isolated -c "CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS vector;"
+          for f in drizzle/*.sql; do
+            psql -v ON_ERROR_STOP=1 -d thermal_isolated -q -f "$f" >/dev/null
+          done
+
+      - name: Vitest thermal isolated suite
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/thermal_isolated
+          # db.ts calls dotenv.config({ override: true }), so the FILE wins over
+          # the variable above. Both must name the same database.
+          DOTENV_CONFIG_PATH: ci-isolated.env
+        run: |
+          printf 'DATABASE_URL=postgres://postgres:postgres@localhost:5432/thermal_isolated\n' > ci-isolated.env
+          npm run test:integration:isolated
+
+      # Its own database: the suites above leave rows behind, and the guard
+      # refuses to truncate a table holding anything it did not seed. Without
+      # a golden corpus (none ships with this repo) the guard prints a skip
+      # line and exits 0; see README § Ranking guard.
+      - name: Create ranking-guard database
+        run: |
+          set -e
+          psql -d memory_persistor_test -c "CREATE DATABASE ranking_guard;"
+          psql -v ON_ERROR_STOP=1 -d ranking_guard -c "CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS vector;"
+          for f in drizzle/*.sql; do
+            psql -v ON_ERROR_STOP=1 -d ranking_guard -q -f "$f" >/dev/null
+          done
+
+      - name: Ranking-regression guard
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/ranking_guard
+          DOTENV_CONFIG_PATH: ci-guard.env
+        run: |
+          printf 'DATABASE_URL=postgres://postgres:postgres@localhost:5432/ranking_guard\n' > ci-guard.env
+          node --import tsx scripts/ranking-guard.ts

@@ -355,8 +355,9 @@ class TestRunPsqlRouting:
             stdout = "2026-04-13 06:00:00+00"
             stderr = ""
 
-        def fake_run(argv: list[str], **_kwargs: object) -> FakeResult:
+        def fake_run(argv: list[str], **kwargs: object) -> FakeResult:
             captured["argv"] = argv
+            captured["env"] = kwargs.get("env")
             return FakeResult()
 
         with patch.dict("os.environ", {"DATABASE_URL": self.REMOTE_URL}, clear=True):
@@ -366,8 +367,16 @@ class TestRunPsqlRouting:
                 with patch.object(events_canary.subprocess, "run", fake_run):
                     events_canary.run_psql("SELECT 1")
 
+        # Routing — psql, not the docker fallback, aimed at the remote host.
         assert captured["argv"][0] == "psql"
-        assert captured["argv"][1] == self.REMOTE_URL
+        assert captured["argv"][1] == (
+            "postgresql://postgres@aws-0-region.pooler.supabase.com:6543/postgres"
+        )
+        # ...and the password travels in the environment, never in argv, because
+        # /proc/<pid>/cmdline is world-readable (an earlier issue, follow-up 1). The
+        # userinfo must carry no `:password` segment at all.
+        assert ":x@" not in captured["argv"][1]
+        assert captured["env"]["PGPASSWORD"] == "x"
 
     def test_local_url_without_psql_uses_docker(self) -> None:
         captured: dict[str, list[str]] = {}
@@ -388,3 +397,120 @@ class TestRunPsqlRouting:
 
         assert captured["argv"][0] == "docker"
         assert "compose" in captured["argv"]
+
+
+# ── two-tier freshness (heartbeat vs pipeline) ───────────────────────────────
+
+
+class TestParseTwoTimestamps:
+    def test_both_present(self) -> None:
+        p, h = events_canary.parse_two_timestamps(
+            "2026-07-14 11:00:00+00~2026-07-14 06:00:00+00"
+        )
+        assert p is not None and h is not None
+
+    def test_pipe_present_hb_empty(self) -> None:
+        p, h = events_canary.parse_two_timestamps("2026-07-14 11:00:00+00~")
+        assert p is not None and h is None
+
+    def test_pipe_empty_hb_present(self) -> None:
+        p, h = events_canary.parse_two_timestamps("~2026-07-14 06:00:00+00")
+        assert p is None and h is not None
+
+    def test_both_empty(self) -> None:
+        assert events_canary.parse_two_timestamps("~") == (None, None)
+
+    def test_missing_delimiter_raises(self) -> None:
+        with pytest.raises(ValueError):
+            events_canary.parse_two_timestamps("2026-07-14 11:00:00+00")
+
+
+class TestTwoTierVerdict:
+    NOW = datetime(2026, 7, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _v(self, pipe_h, hb_h):
+        pipe = None if pipe_h is None else self.NOW - timedelta(hours=pipe_h)
+        hb = None if hb_h is None else self.NOW - timedelta(hours=hb_h)
+        return events_canary.two_tier_verdict(pipe, hb, self.NOW, 24, 72)
+
+    def test_pipe_fresh_is_healthy(self) -> None:
+        state, should_alert, _, _ = self._v(pipe_h=1, hb_h=1)
+        assert state == "healthy" and not should_alert
+
+    def test_pipe_stale_hb_fresh_is_pipeline_silent_alert(self) -> None:
+        state, should_alert, _, _ = self._v(pipe_h=100, hb_h=1)
+        assert state == "pipeline_silent" and should_alert
+
+    def test_pipe_stale_hb_stale_is_idle_no_alert(self) -> None:
+        state, should_alert, _, _ = self._v(pipe_h=100, hb_h=48)
+        assert state == "idle" and not should_alert
+
+    def test_pipe_stale_hb_none_is_idle_no_alert(self) -> None:
+        # Distinct branch: pipe stale, NO heartbeats at all → idle, never alert.
+        state, should_alert, _, _ = self._v(pipe_h=100, hb_h=None)
+        assert state == "idle" and not should_alert
+
+    def test_pipe_none_hb_fresh_is_bootstrap_no_alert(self) -> None:
+        state, should_alert, _, _ = self._v(pipe_h=None, hb_h=1)
+        assert state == "bootstrap" and not should_alert
+
+    def test_both_none_is_empty(self) -> None:
+        state, should_alert, _, _ = self._v(pipe_h=None, hb_h=None)
+        assert state == "empty" and should_alert
+
+    def test_pipe_age_exactly_at_threshold_is_healthy(self) -> None:
+        # pipe_fresh uses <=, so age == 72h is still fresh. A <=→< regression
+        # would flip this to 'idle' — locked here.
+        state, should_alert, _, _ = self._v(pipe_h=72, hb_h=1)
+        assert state == "healthy" and not should_alert
+
+    def test_hb_age_exactly_at_threshold_is_not_fresh(self) -> None:
+        # hb_fresh uses strict <, so hb age == 24h is NOT fresh → no alert even
+        # with a stale pipe. A <→<= regression would turn this into a FALSE
+        # ALERT — the exact failure mode this whole change exists to prevent.
+        state, should_alert, _, _ = self._v(pipe_h=100, hb_h=24)
+        assert state == "idle" and not should_alert
+
+
+class TestCheckEventsTwoTier:
+    NOW = datetime(2026, 7, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _runner(self, raw: str):
+        def _call(query: str) -> str:
+            assert "event_type" in query and "public.events" in query
+            return raw
+
+        return _call
+
+    def test_alert_when_active_but_pipeline_silent(self) -> None:
+        pipe = (self.NOW - timedelta(hours=100)).isoformat()
+        hb = (self.NOW - timedelta(hours=1)).isoformat()
+        r = events_canary.check_events_two_tier(
+            now=self.NOW, psql_runner=self._runner(f"{pipe}~{hb}")
+        )
+        assert r.should_alert and r.state == "pipeline_silent"
+        assert "STALE" in r.render_detail()
+
+    def test_idle_when_both_quiet(self) -> None:
+        pipe = (self.NOW - timedelta(hours=100)).isoformat()
+        hb = (self.NOW - timedelta(hours=48)).isoformat()
+        r = events_canary.check_events_two_tier(
+            now=self.NOW, psql_runner=self._runner(f"{pipe}~{hb}")
+        )
+        assert not r.should_alert and r.state == "idle"
+        assert "idle" in r.render_detail()
+
+    def test_empty_table_alerts_and_renders_empty(self) -> None:
+        r = events_canary.check_events_two_tier(
+            now=self.NOW, psql_runner=self._runner("~")
+        )
+        assert r.should_alert and r.state == "empty"
+        assert "empty" in r.render_detail()
+
+    def test_bootstrap_when_heartbeats_but_no_pipeline_events(self) -> None:
+        hb = (self.NOW - timedelta(hours=1)).isoformat()
+        r = events_canary.check_events_two_tier(
+            now=self.NOW, psql_runner=self._runner(f"~{hb}")
+        )
+        assert not r.should_alert and r.state == "bootstrap"
+        assert "no pipeline events yet" in r.render_detail()

@@ -18,6 +18,7 @@
  * loudly (the pre-loop probe aborts, or a per-row throw increments `failed`).
  * Delete this file after the fleet is backfilled.
  */
+import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { and, isNull, inArray, eq } from 'drizzle-orm';
 import { db, closeDb } from '../src/db.js';
@@ -125,11 +126,24 @@ async function main(): Promise<void> {
   process.exit(result.failed > 0 ? 1 : 0);
 }
 
-// Only run the CLI when invoked directly, not when imported by a test.
-// pathToFileURL handles percent-encoding + symlink realpath so a repo path with
-// spaces or a symlinked checkout doesn't make this comparison silently false
-// (which would exit 0 having embedded nothing).
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * True when this module is the process entry point (not a test import).
+ * pathToFileURL does NOT resolve symlinks but the ESM loader does, so argv[1]
+ * must be realpath'd first or a symlinked invocation silently no-ops with
+ * exit 0 (having embedded nothing). argv[1] is undefined under `node --eval` /
+ * REPL imports, and realpathSync throws on virtual entries — both mean
+ * "imported".
+ */
+function isMain(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
   main().catch((err) => {
     console.error('Fatal:', err);
     process.exit(1);

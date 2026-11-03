@@ -46,6 +46,47 @@ describe('isLocalDatabaseUrl', () => {
   });
 });
 
+describe('isLocalDatabaseUrl parses the host, it does not scan the string', () => {
+  // A substring scan lets a REMOTE url pass as local with no opt-in at all —
+  // the guard's primary control, defeated by a password or a query parameter.
+  it('rejects a remote host whose password contains "@localhost:"', () => {
+    // Two `@` and no `/` before the second: per RFC 3986 the LAST `@` ends the
+    // userinfo, so the real host is prod.example.com and `p@localhost:5` is
+    // just part of the password. The old substring scan called this local.
+    expect(
+      isLocalDatabaseUrl('postgresql://u:p@localhost:5@prod.example.com:5432/db'),
+    ).toBe(false);
+  });
+
+  it('treats a slash-terminated authority as the host it really is', () => {
+    // Counter-case, so the assertion above is not mistaken for "any string
+    // containing localhost is remote": here the authority ENDS at the first
+    // `/`, so this genuinely is localhost:5 with an odd database name — which
+    // is what libpq connects to as well.
+    expect(
+      isLocalDatabaseUrl('postgresql://u:p@localhost:5/x@prod.example.com:5432/db'),
+    ).toBe(true);
+  });
+
+  it('rejects a remote host with "//localhost:" in a query parameter', () => {
+    expect(
+      isLocalDatabaseUrl('postgresql://u:p@10.0.0.5:5432/db?application_name=//localhost:1'),
+    ).toBe(false);
+  });
+
+  it('fails closed on an unparseable url', () => {
+    expect(isLocalDatabaseUrl('not a url at all')).toBe(false);
+    expect(isLocalDatabaseUrl('')).toBe(false);
+  });
+
+  it('still accepts the genuine local forms', () => {
+    expect(isLocalDatabaseUrl('postgresql://u:p@localhost:5432/db')).toBe(true);
+    expect(isLocalDatabaseUrl('postgresql://u:p@127.0.0.1:5432/db')).toBe(true);
+    expect(isLocalDatabaseUrl('postgresql://localhost:5432/db')).toBe(true);
+    expect(isLocalDatabaseUrl('postgres://u:p@[::1]:5432/db')).toBe(true);
+  });
+});
+
 describe('isKnownRemoteDatabaseUrl', () => {
   it('matches the db.<ref>.supabase.co direct host', () => {
     expect(
@@ -193,7 +234,8 @@ describe('helpers.ts resolves DATABASE_URL the same way src/db.ts does', () => {
     readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
 
   it('helpers.ts overrides from DOTENV_CONFIG_PATH, like db.ts', () => {
-    expect(read('./integration/helpers.ts')).toMatch(
+    const helpers = read('./integration/helpers.ts');
+    expect(helpers).toMatch(
       /dotenv\.config\(\{\s*path:\s*process\.env\.DOTENV_CONFIG_PATH,\s*override:\s*true,\s*quiet:\s*true\s*\}\)/,
     );
   });

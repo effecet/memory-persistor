@@ -6,16 +6,30 @@
  * + a live connection just by being imported).
  */
 
+/** Hosts that count as "this machine" for the purposes of the guard below. */
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
 /**
- * True when `url`'s host is localhost or 127.0.0.1.
+ * True when `url`'s HOST is localhost / 127.0.0.1 / ::1.
  *
- * The `//` alternative matters: a credential-less URL like
- * `postgresql://localhost:5432/db` has no `@`, and an `^`/`@`-only anchor
- * would reject it — hard-failing the suite against a perfectly valid local
- * target.
+ * Parses the URL and compares the hostname exactly. It must NOT scan the raw
+ * string: a password or a query parameter can legally contain `@localhost:`,
+ * and a substring match then classifies a genuinely remote target as local —
+ * which lifts the guard entirely, with no opt-in required. Both shapes were
+ * observed passing the previous regex:
+ *
+ *   postgresql://u:p@localhost:5/x@prod.example.com:5432/db
+ *   postgresql://u:p@10.0.0.5:5432/db?application_name=//localhost:1
+ *
+ * Fails CLOSED: an unparseable or empty URL is not local, so a malformed
+ * value falls through to the caller's refusal rather than being waved past.
  */
 export function isLocalDatabaseUrl(url: string): boolean {
-  return /(?:^|@|\/\/)(localhost|127\.0\.0\.1)(?::|\/)/i.test(url);
+  try {
+    return LOCAL_HOSTS.has(new URL(url).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 /**

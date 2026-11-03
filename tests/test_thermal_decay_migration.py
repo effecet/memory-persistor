@@ -2,28 +2,95 @@
 """Drift guard for the versioned thermal decay job.
 
 The decay contract lives in two hand-written copies: ``src/config.ts`` holds the
-constants, ``drizzle/0010_thermal_decay_function.sql`` holds the query that uses
-them. Before that migration existed, the query lived ONLY as a live row in
-``cron.job`` on the managed instance — in no migration and no script — so a
-``config.ts`` edit could silently diverge from what actually ran nightly.
+constants, and a ``drizzle/*.sql`` migration holds the query that uses them.
+Before 0010 existed, the query lived ONLY as a live row in ``cron.job`` on
+the managed instance — in no migration and no script — so a ``config.ts`` edit could
+silently diverge from what actually ran nightly.
 
-This guard fails when one copy moves without the other.
+The function body has been superseded repeatedly (0010 → 0013 → 0014 → 0015),
+each time by a full copy, so the migration that MATTERS is whichever one
+``make migrate`` applies last. That target is **discovered, never hardcoded**
+— see ``_decay_definers``. It used to be a literal path, which is how this
+guard came to validate dead SQL: it named 0013 while 0014 had already
+superseded 0013's body, so it spent that whole period pinning ``config.ts``
+against a definition Postgres no longer ran, while reporting a clean pass.
+
+The cron schedule assertions are the exception: the superseding migrations
+deliberately do NOT re-schedule the job, so the schedule still lives only in
+0010 (see ``SCHEDULE_MIGRATION`` below).
+
+This guard fails when one copy moves without the other. It mirrors the existing
+``test_memory_dedup.py::TestTsSlugDrift`` /
+``test_backup_prune.py::TestSlugify`` pattern.
 """
 
 import re
-import pytest
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
-MIGRATION = REPO / "drizzle" / "0010_thermal_decay_function.sql"
+# Matches both the original CREATE FUNCTION and every CREATE OR REPLACE that
+# superseded it, so the chain is discovered however a future migration spells it.
+_DEFINES_DECAY = re.compile(
+    r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+public\.memory_thermal_decay\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Drop whole-line ``--`` comments.
+
+    These migrations quote SQL at length in their headers — 0015 discusses
+    CREATE OR REPLACE in prose — so matching raw file text would let a COMMENT
+    in a future migration re-target this guard onto a file that defines
+    nothing. ``tests/test_thermal_test_isolation.py`` strips comments before
+    matching for exactly this reason.
+    """
+    return "\n".join(
+        line for line in sql.splitlines() if not line.lstrip().startswith("--")
+    )
+
+
+def _decay_definers() -> list[Path]:
+    """Every migration that defines public.memory_thermal_decay(), in apply order.
+
+    Migrations are zero-padded and applied in filename order (``make migrate``
+    globs ``drizzle/*.sql`` and sorts), so lexicographic order IS apply order.
+    """
+    return sorted(
+        path
+        for path in (REPO / "drizzle").glob("*.sql")
+        if _DEFINES_DECAY.search(_strip_sql_comments(path.read_text()))
+    )
+
+
+_DEFINERS = _decay_definers()
+assert _DEFINERS, "no drizzle migration defines public.memory_thermal_decay()"
+# The LAST definer is the one left standing after every migration is applied —
+# the only body Postgres actually runs, and therefore the only one worth
+# pinning src/config.ts against.
+MIGRATION = _DEFINERS[-1]
+# The superseding migrations use CREATE OR REPLACE FUNCTION and deliberately do
+# NOT re-schedule the cron job — the schedule (cron.schedule /
+# memory-thermal-decay / 0 6 * * *) still lives only in 0010, so the
+# schedule-specific assertions target it directly rather than MIGRATION.
+SCHEDULE_MIGRATION = REPO / "drizzle" / "0010_thermal_decay_function.sql"
+# 0012's static seed for the thermal_cutoffs row. Once 0013 exists,
+# memory_thermal_decay() overwrites this row at runtime (Pass 3), so a runtime
+# integration test can no longer prove the SEED matches TIER_HOT/TIER_WARM —
+# see test_0012_seed_matches_tier_hot_warm below, and
+# tests/integration/isolated/thermal-cutoffs-migration.test.ts's beforeEach comment.
+MIGRATION_0012 = REPO / "drizzle" / "0012_thermal_cutoffs.sql"
 CONFIG = REPO / "src" / "config.ts"
 THERMAL_TS = REPO / "src" / "thermal.ts"
 
 # Each constant is pinned to the SQL EXPRESSION it appears in, not to its bare
-# value. A bare-value check is close to vacuous here: "3", "5", "30" and "0.1"
-# all occur incidentally elsewhere in the file (including inside comments), so a
+# value. A bare-value check is close to vacuous here: "3", "5", "0.05" and "0.1"
+# occur many times elsewhere in the function (comments included), so a
 # substring guard reports green while the maths has actually drifted. `{v}` is
-# substituted with the value read from src/config.ts.
+# substituted with the value read from src/config.ts; matching runs on the SQL
+# with comment lines removed.
 CONSTANT_EXPRESSIONS = {
     "DECAY_RATE": r"ELSE {v}::real",
     "DECAY_THRESHOLD_HOURS": r"INTERVAL '1 hour' \* {v}\b",
@@ -35,17 +102,14 @@ CONSTANT_EXPRESSIONS = {
     "IMPORTANCE_DRIFT_NEGLECT_DAYS": r"INTERVAL '1 day' \* {v}\b",
     "IMPORTANCE_CAP": r"LEAST\({v}::real",
     "IMPORTANCE_FLOOR": r"GREATEST\({v}::real",
-    "TIER_HOT": r"> {v} THEN 'HOT'",
-    "TIER_WARM": r"> {v} THEN 'WARM'",
+    # The seeds are the fallback cutoffs written when no measured band exists.
+    "TIER_HOT": r"THEN {v}::real ELSE b\.min_hot\b",
+    "TIER_WARM": r"THEN {v}::real ELSE b\.min_warm\b",
+    "HOT_QUANTILE": r"ranked\.pr >= {v}::real THEN 'HOT'",
+    "WARM_QUANTILE": r"ranked\.pr >= {v}::real THEN 'WARM'",
     "STALE_THRESHOLD_DAYS": r"INTERVAL '1 day' \* {v}\b",
+    "TEMPERATURE_FLOOR_EPSILON": r"e\.temperature < {v}::real THEN 0\.0::real",
 }
-
-
-def _const(name: str) -> str:
-    """Read a numeric constant out of src/config.ts, normalized like SQL writes it."""
-    m = re.search(rf"^export const {name} = ([0-9._]+)", CONFIG.read_text(), re.M)
-    assert m, f"{name} not found in src/config.ts"
-    return m.group(1).rstrip(".")
 
 
 def _sql_without_comments() -> str:
@@ -56,18 +120,47 @@ def _sql_without_comments() -> str:
     )
 
 
-def test_migration_exists():
-    assert MIGRATION.exists(), "drizzle/0010_thermal_decay_function.sql is missing"
+def _const(name: str) -> str:
+    """Read a numeric constant out of src/config.ts, normalized like SQL writes it.
+
+    Handles scientific notation (e.g. ``1e-6``, TEMPERATURE_FLOOR_EPSILON's
+    literal form) as well as plain decimals — a ``[0-9._]+`` character class
+    stops at the ``e``/``-`` in ``1e-6`` and silently returns just ``1``, which
+    makes the membership check below vacuous (every migration contains the
+    digit "1" somewhere). Verified against a mutation: with the narrower class,
+    changing TEMPERATURE_FLOOR_EPSILON to 2e-6 did NOT turn
+    test_plain_constants_appear_in_migration red.
+    """
+    m = re.search(
+        rf"^export const {name} = ([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)",
+        CONFIG.read_text(),
+        re.M,
+    )
+    assert m, f"{name} not found in src/config.ts"
+    return m.group(1).rstrip(".")
+
+
+def test_migration_is_the_last_definer():
+    """The pinned migration must be the one no later migration supersedes.
+
+    NOT tautological against a careless edit: it goes red the moment MIGRATION
+    is hardcoded to a literal path again and a later migration redefines the
+    function. That is the exact state this file sat in between 0014 and
+    0015 — pointing at 0013, validating SQL that no longer ran, passing.
+    """
+    later = [p.name for p in _decay_definers() if p.name > MIGRATION.name]
+    assert not later, (
+        f"{MIGRATION.name} is superseded by {later} — this guard is pinning dead SQL"
+    )
 
 
 @pytest.mark.parametrize("name", sorted(CONSTANT_EXPRESSIONS))
 def test_constant_appears_in_its_sql_expression(name: str):
-    """Each config.ts constant must appear in the SQL expression that uses it."""
+    """Each constant must sit in the expression that uses it, not just anywhere."""
     value = re.escape(_const(name))
     pattern = CONSTANT_EXPRESSIONS[name].replace("{v}", value)
     assert re.search(pattern, _sql_without_comments()), (
-        f"{name} = {_const(name)} does not appear in the migration as /{pattern}/ "
-        f"— config.ts and the SQL have drifted"
+        f"{name} = {_const(name)} not found in its expression /{pattern}/ in {MIGRATION.name}"
     )
 
 
@@ -86,8 +179,31 @@ def test_encoded_pattern_multiplier_base():
     )
 
 
+def test_0012_seed_matches_tier_hot_warm():
+    """0012's static seed row must equal TIER_HOT/TIER_WARM — a STATIC guard.
+
+    Before 0013, tests/integration/isolated/thermal-cutoffs-migration.test.ts asserted
+    this at runtime by reading the live row. Since 0013,
+    memory_thermal_decay() writes real values to that same row on every call
+    (Pass 3), so any earlier suite in the shared integration DB overwrites it
+    before that test's assertion runs — its `beforeEach` now RE-WRITES the
+    seed values it then asserts on, which tests the fixture, not the
+    migration. This test restores the coverage by reading the migration file
+    directly: it fails if 0012 ever seeds different numbers, OR if the seed
+    INSERT is removed entirely, OR if TIER_HOT/TIER_WARM in config.ts drift
+    away from what 0012 hardcodes.
+    """
+    expected = f"VALUES (1, {_const('TIER_HOT')}, {_const('TIER_WARM')}, 0)"
+    sql = MIGRATION_0012.read_text()
+    assert expected in sql, (
+        f"0012's seed does not match TIER_HOT/TIER_WARM: expected {expected!r} "
+        f"in {MIGRATION_0012.name}"
+    )
+
+
 def test_schedules_the_named_job():
-    sql = MIGRATION.read_text()
+    """The cron schedule lives only in 0010 — 0013 deliberately does not repeat it."""
+    sql = SCHEDULE_MIGRATION.read_text()
     assert "cron.schedule" in sql
     assert "memory-thermal-decay" in sql
     assert "0 6 * * *" in sql
@@ -96,17 +212,13 @@ def test_schedules_the_named_job():
 def test_migration_is_idempotent_by_construction():
     """Re-applying must not create a second function or a second cron job."""
     sql = MIGRATION.read_text()
-    assert "DROP FUNCTION IF EXISTS public.memory_thermal_decay();" in sql, (
-        "a bare CREATE OR REPLACE cannot change a RETURNS TABLE column list "
-        "(Postgres: 'cannot change return type of existing function'), so the "
-        "DROP must stay or a future column change breaks every applied database"
-    )
-    assert "CREATE FUNCTION public.memory_thermal_decay()" in sql
-    assert "cron.unschedule" in sql, (
+    assert "CREATE OR REPLACE FUNCTION" in sql
+    schedule_sql = SCHEDULE_MIGRATION.read_text()
+    assert "cron.unschedule" in schedule_sql, (
         "schedule must be guarded by an unschedule so re-application cannot "
         "leave two jobs on pg_cron < 1.4"
     )
-    assert "AND database = current_database()" in sql, (
+    assert "AND database = current_database()" in schedule_sql, (
         "cron.job is cluster-wide, so an unscoped unschedule applied in a second "
         "database tears down the first database's job"
     )

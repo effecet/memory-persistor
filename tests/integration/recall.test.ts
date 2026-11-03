@@ -76,9 +76,16 @@ describe('recall integration', () => {
     expect(memAResult).toBeDefined();
     expect(memAResult!.score).toBeGreaterThan(0);
 
-    // Results should be in descending score order
+    // Two groups: every live row before every superseded one, and
+    // descending score within each group — not across the boundary. This
+    // fixture has no supersedes edge, so only the within-group half runs here;
+    // the cross-group ordering is pinned by recall-supersedes.test.ts.
+    const superseded = results.map((r) => r.superseded_by !== undefined);
+    expect(superseded.indexOf(true) === -1 || superseded.lastIndexOf(false) < superseded.indexOf(true)).toBe(true);
     for (let i = 1; i < results.length; i++) {
-      expect(results[i - 1].score).toBeGreaterThanOrEqual(results[i].score);
+      if (superseded[i - 1] === superseded[i]) {
+        expect(results[i - 1].score).toBeGreaterThanOrEqual(results[i].score);
+      }
     }
   });
 

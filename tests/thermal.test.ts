@@ -14,23 +14,27 @@ describe('computeTier', () => {
     expect(computeTier(0.71)).toBe('HOT');
   });
 
-  it('returns WARM for temperature between 0.3 and 0.7', () => {
+  it('returns WARM for temperature in [0.3, 0.7)', () => {
     expect(computeTier(0.5)).toBe('WARM');
-    expect(computeTier(0.7)).toBe('WARM');
+    expect(computeTier(0.69)).toBe('WARM');
     expect(computeTier(0.31)).toBe('WARM');
   });
 
-  it('returns COLD for temperature at or below 0.3', () => {
-    expect(computeTier(0.3)).toBe('COLD');
+  it('returns COLD for temperature below 0.3', () => {
+    expect(computeTier(0.29)).toBe('COLD');
     expect(computeTier(0.1)).toBe('COLD');
     expect(computeTier(0.0)).toBe('COLD');
   });
 
-  it('handles boundary values exactly', () => {
-    expect(computeTier(TIER_HOT)).toBe('WARM');      // 0.7 is NOT > 0.7
-    expect(computeTier(TIER_HOT + 0.01)).toBe('HOT');
-    expect(computeTier(TIER_WARM)).toBe('COLD');      // 0.3 is NOT > 0.3
-    expect(computeTier(TIER_WARM + 0.01)).toBe('WARM');
+  it('handles boundary values exactly — boundaries are INCLUSIVE', () => {
+    // A row sitting exactly ON a cutoff belongs to the band ABOVE it, because
+    // pass 3 of drizzle/0013 derives each cutoff as MIN(temperature) within a
+    // band — so the defining row is a member of that band. bump()'s SQL uses
+    // >= for the same reason; an exclusive > here diverged from it by one row.
+    expect(computeTier(TIER_HOT)).toBe('HOT');       // 0.7 IS >= 0.7
+    expect(computeTier(TIER_HOT - 0.01)).toBe('WARM');
+    expect(computeTier(TIER_WARM)).toBe('WARM');     // 0.3 IS >= 0.3
+    expect(computeTier(TIER_WARM - 0.01)).toBe('COLD');
   });
 });
 
@@ -61,7 +65,7 @@ describe('thermal decay math', () => {
     const warmTemp = 0.5;
     const bumped = Math.min(1.0, warmTemp + BUMP_AMOUNT);
     expect(bumped).toBe(0.7);
-    expect(computeTier(bumped)).toBe('WARM'); // 0.7 is boundary, still WARM
+    expect(computeTier(bumped)).toBe('HOT'); // 0.7 is the boundary, and it is inclusive
 
     const bumpedAgain = Math.min(1.0, bumped + BUMP_AMOUNT);
     expect(bumpedAgain).toBeCloseTo(0.9, 5);

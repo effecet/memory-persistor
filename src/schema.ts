@@ -11,15 +11,17 @@ import {
   text,
   real,
   integer,
+  smallint,
   timestamp,
   boolean,
   jsonb,
   index,
+  uniqueIndex,
   check,
   vector,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
-import type { PendingCategory, PendingPriority, PendingStatus } from './config.js';
+import type { EdgeProvenance, PendingCategory, PendingPriority, PendingStatus } from './config.js';
 
 // ── Entities (memories) ────────────────────────────────────────────────────
 
@@ -32,6 +34,11 @@ export const entities = pgTable('entities', {
   source: text('source').notNull(), // CWD path where remember was invoked
   importance: real('importance').default(0.5),
   temperature: real('temperature').default(1.0),
+  // cume_dist over the live temperature distribution, written nightly by
+  // memory_thermal_decay(). Nullable — rows created between runs have no rank yet.
+  // cume_dist, not percent_rank: a tied group must take the HIGHEST fraction, or
+  // the tie at 1.0 that bump() manufactures on every read empties HOT.
+  temperatureRank: real('temperature_rank'),
   tier: text('tier').default('HOT'), // HOT | WARM | COLD (computed on write)
   accessCount: integer('access_count').default(0),
   accessBitmap: integer('access_bitmap').default(0),
@@ -48,6 +55,19 @@ export const entities = pgTable('entities', {
   index('idx_entities_temperature').on(table.temperature),
   index('idx_entities_tags').using('gin', table.tags),
 ]);
+
+// ── Thermal cutoffs (single row) ───────────────────────────────────────────
+// Tier is assigned from cume_dist nightly; bump() applies these cached value
+// cutoffs intra-day so it stays one cheap statement. See src/thermal-cutoffs.ts.
+// corpus_size = 0 marks a seed row (never measured) — resolveCutoffs() treats it
+// as `seed`, and memory_thermal_decay() writes it whenever a band is empty.
+export const thermalCutoffs = pgTable('thermal_cutoffs', {
+  id: smallint('id').primaryKey().default(1),
+  hotCutoff: real('hot_cutoff').notNull(),
+  warmCutoff: real('warm_cutoff').notNull(),
+  corpusSize: integer('corpus_size').notNull().default(0),
+  computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 // ── Memory versions (audit trail) ──────────────────────────────────────────
 
@@ -72,10 +92,25 @@ export const memoryRelations = pgTable('memory_relations', {
   toId: uuid('to_id').references(() => entities.id, { onDelete: 'cascade' }).notNull(),
   relationType: text('relation_type').notNull(),
   weight: real('weight').default(1.0),
+  // Who made the claim: 'asserted' or 'inferred'. See EdgeProvenance.
+  //
+  // NO `.default()` here, although the database column has DEFAULT 'inferred'.
+  // Deliberate divergence: without it Drizzle's insert type makes provenance
+  // REQUIRED, so a new write site must choose instead of silently inheriting
+  // 'inferred'. Enforced only where tsc runs — `tsconfig.json` includes `src/`
+  // alone, so scripts/ and tests/ set it by convention, not by the compiler.
+  // The DB default stays for machines still on earlier code, whose inserts
+  // omit the column — dropping it would break them mid-rollout.
+  provenance: text('provenance').$type<EdgeProvenance>().notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 }, (table) => [
   index('idx_relations_from').on(table.fromId),
   index('idx_relations_to').on(table.toId),
+  // Mirrors drizzle/0017_relation_edge_unique.sql: one row per edge.
+  uniqueIndex('memory_relations_edge_unique').on(table.fromId, table.toId, table.relationType),
+  // Mirrors drizzle/0016_relation_provenance.sql, for the same reason as the
+  // pending CHECKs below.
+  check('memory_relations_provenance_check', sql`${table.provenance} IN ('asserted', 'inferred')`),
 ]);
 
 // ── Events (observability) ─────────────────────────────────────────────────
@@ -109,12 +144,19 @@ export const pending = pgTable('pending', {
   priority: text('priority').$type<PendingPriority>().notNull().default('medium'),
   status: text('status').$type<PendingStatus>().notNull().default('open'),
   source: text('source'), // cwd where the item was raised
+  // WHERE the item was written. Not a scope — see appliesTo.
   originHost: text('origin_host'),
+  // WHERE the item is TRUE. Empty = fleet-wide. `origin_host` could
+  // never serve as this: plenty of items written on one machine are fleet-wide, so it is
+  // not readable as a scope. NOT NULL + default keeps one spelling of
+  // "fleet-wide" instead of NULL and '{}' both meaning it.
+  appliesTo: text('applies_to').array().notNull().default([]),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
   resolution: text('resolution'),
 }, (table) => [
   index('idx_pending_status_priority').on(table.status, table.priority),
+  index('idx_pending_applies_to').using('gin', table.appliesTo),
   // Mirrors the CHECK constraints in drizzle/0009_pending.sql. Declared here
   // too so a future `drizzle-kit generate` doesn't silently drop them — the
   // migration is hand-written, so the schema is the only place the generator

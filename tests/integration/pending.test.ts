@@ -40,6 +40,7 @@ describe('pending table', () => {
     );
     const names = res.rows.map((r) => r.indexname as string);
     expect(names).toContain('idx_pending_status_priority');
+    expect(names).toContain('idx_pending_applies_to');
   });
 
   it('has no embedding, temperature, or tier columns (queue, not memory)', async () => {
@@ -50,8 +51,13 @@ describe('pending table', () => {
     expect(cols).not.toContain('embedding');
     expect(cols).not.toContain('temperature');
     expect(cols).not.toContain('tier');
+    // `applies_to` is scope, not memory state — it says WHERE an
+    // item is true, which is queue metadata. It does not weaken the assertion
+    // above: this list is exhaustive on purpose, so adding a column to the
+    // table fails here until someone confirms it is not thermal/graph state
+    // leaking into the queue.
     expect(cols.sort()).toEqual([
-      'body', 'category', 'created_at', 'id', 'origin_host',
+      'applies_to', 'body', 'category', 'created_at', 'id', 'origin_host',
       'priority', 'resolution', 'resolved_at', 'source', 'status', 'title',
     ]);
   });
