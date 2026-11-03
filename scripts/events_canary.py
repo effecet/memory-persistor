@@ -25,9 +25,26 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
+
+_HOOKS = Path(__file__).resolve().parent  # psql_dsn.py lives beside this script
+if str(_HOOKS) not in sys.path:
+    sys.path.insert(0, str(_HOOKS))
+from psql_dsn import psql_env  # noqa: E402  (path-insert must precede import)
 
 DEFAULT_THRESHOLD_HOURS = 24
+HEARTBEAT_THRESHOLD_HOURS = 24  # brain-liveness window (heartbeat events)
+# 72h (not 24h) is deliberate: real MCP events are sparse + bursty (~8/active
+# day, ~half the days idle), so a short pipe window would false-alarm via the
+# alert gate whenever the operator is active (fresh heartbeat) but simply hasn't
+# made an explicit remember/recall in a day. 72h makes "active yet zero real
+# events" implausible enough to read as a genuine silent pipeline. Detecting a
+# misroute within 72h of continued use still beats the historical 6-day blindness.
+PIPELINE_THRESHOLD_HOURS = 72  # real MCP-event window (non-heartbeat events)
+
+# The 5 states db_events can resolve to. Literal (not bare str) so mypy catches
+# typos and non-exhaustive handling in render_detail / verdict.
+CanaryState = Literal["empty", "healthy", "bootstrap", "idle", "pipeline_silent"]
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -74,11 +91,15 @@ def run_psql(query: str) -> str:
     database_url = get_database_url()
 
     if shutil.which("psql"):
+        # Password out of argv (/proc/<pid>/cmdline is world-readable) and into
+        # the child env, where /proc/<pid>/environ is owner-only. See psql_dsn.
+        argv_dsn, env = psql_env(database_url)
         result = subprocess.run(
-            ["psql", database_url, "-t", "-A", "-c", query],
+            ["psql", argv_dsn, "-t", "-A", "-c", query],
             capture_output=True,
             text=True,
             timeout=30,
+            env=env,
         )
     elif _is_local(database_url):
         result = subprocess.run(
@@ -158,6 +179,34 @@ class CanaryResult:
         )
 
 
+@dataclass(frozen=True)
+class TwoTierResult:
+    pipe_last: Optional[datetime]
+    hb_last: Optional[datetime]
+    pipe_age_hours: Optional[float]
+    hb_age_hours: Optional[float]
+    hb_threshold_hours: float
+    pipe_threshold_hours: float
+    state: CanaryState
+    should_alert: bool  # db_events unhealthy — True only for 'pipeline_silent' and 'empty'
+    now: datetime
+
+    def render_detail(self) -> str:
+        """Concise one-line detail for the canary card (no raw ISO timestamps)."""
+        p = self.pipe_threshold_hours
+        pipe = f"{self.pipe_age_hours:.1f}h" if self.pipe_age_hours is not None else "—"
+        hb = f"{self.hb_age_hours:.1f}h" if self.hb_age_hours is not None else "—"
+        if self.state == "empty":
+            return f"events table empty (thr {p:.0f}h)"
+        if self.state == "pipeline_silent":
+            return f"STALE · pipeline silent {pipe} while active (hb {hb})"
+        if self.state == "idle":
+            return f"idle · pipeline {pipe} / hb {hb} (both quiet)"
+        if self.state == "bootstrap":
+            return f"healthy · no pipeline events yet (hb {hb})"
+        return f"healthy · pipeline {pipe} (hb {hb})"
+
+
 def parse_max_timestamp(raw: str) -> Optional[datetime]:
     """Parse the psql -t -A output of ``SELECT MAX(created_at) FROM events``.
 
@@ -173,14 +222,68 @@ def parse_max_timestamp(raw: str) -> Optional[datetime]:
     return ts
 
 
+def parse_two_timestamps(raw: str) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Parse the ``<pipe>~<hb>`` output of the two-tier MAX query. Either side may
+    be empty (SQL NULL → empty string). The '~' delimiter is guaranteed by the
+    query's COALESCE-to-text, so its absence means a malformed response."""
+    raw = raw.strip()
+    if "~" not in raw:
+        raise ValueError(f"two-tier query output missing '~' delimiter: {raw!r}")
+    pipe_str, hb_str = raw.split("~", 1)
+    return parse_max_timestamp(pipe_str), parse_max_timestamp(hb_str)
+
+
+def _age_hours(now: datetime, ts: Optional[datetime]) -> Optional[float]:
+    return None if ts is None else (now - ts).total_seconds() / 3600.0
+
+
+def two_tier_verdict(
+    pipe_last: Optional[datetime],
+    hb_last: Optional[datetime],
+    now: datetime,
+    hb_threshold_hours: float,
+    pipe_threshold_hours: float,
+) -> tuple[CanaryState, bool, Optional[float], Optional[float]]:
+    """Discriminate idle-brain from a silent pipeline. should_alert=True only when
+    the brain is actively touched (hb fresh) yet real MCP events have gone silent
+    (pipe non-NULL and stale). Returns (state, should_alert, pipe_age, hb_age).
+
+    Boundary asymmetry is deliberate: ``hb_fresh`` uses strict ``<`` (so a
+    heartbeat exactly at the threshold is NOT fresh and cannot trigger an alert —
+    the conservative choice), while ``pipe_fresh``/``pipe_stale`` use ``<=``/``>``
+    as a complementary partition (no gap/overlap at the boundary).
+    """
+    pipe_age = _age_hours(now, pipe_last)
+    hb_age = _age_hours(now, hb_last)
+    hb_fresh = hb_age is not None and hb_age < hb_threshold_hours
+    pipe_fresh = pipe_age is not None and pipe_age <= pipe_threshold_hours
+    pipe_stale = pipe_age is not None and pipe_age > pipe_threshold_hours
+
+    if pipe_last is None and hb_last is None:
+        return "empty", True, pipe_age, hb_age
+    if pipe_fresh:
+        return "healthy", False, pipe_age, hb_age
+    if pipe_stale and hb_fresh:
+        return "pipeline_silent", True, pipe_age, hb_age
+    if pipe_last is None and hb_fresh:
+        return "bootstrap", False, pipe_age, hb_age
+    return "idle", False, pipe_age, hb_age
+
+
 def check_events_freshness(
     threshold_hours: float = DEFAULT_THRESHOLD_HOURS,
     now: Optional[datetime] = None,
     psql_runner=run_psql,
 ) -> CanaryResult:
-    """Core logic: query events MAX(created_at) and compare to threshold."""
+    """Core logic: query the newest REAL (non-heartbeat) event and compare to
+    threshold. Heartbeats are excluded — they are a ≤6h liveness ping, so counting
+    them here would keep this single-tier check permanently 'fresh' and blind it to
+    a silent MCP pipeline (the failure it exists to catch). Two-tier callers use
+    check_events_two_tier; this stays the simple real-pipeline freshness signal."""
     current = now or datetime.now(timezone.utc)
-    raw = psql_runner("SELECT MAX(created_at) FROM public.events;")
+    raw = psql_runner(
+        "SELECT MAX(created_at) FROM public.events WHERE event_type <> 'heartbeat';"
+    )
     last_event = parse_max_timestamp(raw)
 
     if last_event is None:
@@ -202,6 +305,40 @@ def check_events_freshness(
         threshold_hours=threshold_hours,
         is_stale=is_stale,
         is_empty=False,
+        now=current,
+    )
+
+
+def check_events_two_tier(
+    hb_threshold_hours: float = HEARTBEAT_THRESHOLD_HOURS,
+    pipe_threshold_hours: float = PIPELINE_THRESHOLD_HOURS,
+    now: Optional[datetime] = None,
+    psql_runner=run_psql,
+) -> TwoTierResult:
+    """Two-tier freshness: newest non-heartbeat event (pipe) + newest heartbeat
+    (hb). COALESCE-to-text with a '~' delimiter makes parsing independent of
+    psql's field separator."""
+    current = now or datetime.now(timezone.utc)
+    raw = psql_runner(
+        "SELECT "  # noqa: S608 — literal SQL, no bind params (run_psql contract)
+        "COALESCE(MAX(created_at) FILTER (WHERE event_type <> 'heartbeat')::text, '') "
+        "|| '~' || "
+        "COALESCE(MAX(created_at) FILTER (WHERE event_type = 'heartbeat')::text, '') "
+        "FROM public.events;"
+    )
+    pipe_last, hb_last = parse_two_timestamps(raw)
+    state, should_alert, pipe_age, hb_age = two_tier_verdict(
+        pipe_last, hb_last, current, hb_threshold_hours, pipe_threshold_hours
+    )
+    return TwoTierResult(
+        pipe_last=pipe_last,
+        hb_last=hb_last,
+        pipe_age_hours=pipe_age,
+        hb_age_hours=hb_age,
+        hb_threshold_hours=hb_threshold_hours,
+        pipe_threshold_hours=pipe_threshold_hours,
+        state=state,
+        should_alert=should_alert,
         now=current,
     )
 

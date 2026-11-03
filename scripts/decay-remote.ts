@@ -10,8 +10,10 @@
  * (the Makefile target pins .env.supabase):
  *   DOTENV_CONFIG_PATH=.env.supabase npx tsx scripts/decay-remote.ts
  *
- * Runs the same versioned decay the nightly pg_cron job calls
- * (drizzle/0010_thermal_decay_function.sql) plus the file-sync half that
+ * Runs the same versioned decay the nightly pg_cron job calls (whichever
+ * drizzle migration last defines public.memory_thermal_decay — 0015 as of
+ * the cold-pole fix; the job itself stores the call as text and resolves it at run time)
+ * plus the file-sync half that
  * only a machine with the memory dirs can do — see decayAll() in
  * src/thermal.ts.
  */

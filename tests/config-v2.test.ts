@@ -58,18 +58,14 @@ describe('scoring weights', () => {
     }
   });
 
-  it('the query-independent group can no longer outweigh relevance additively', () => {
+  it('the query-independent group can no longer outweigh relevance additively', async () => {
     // The defect this rebalance fixed: under the flat model the five
     // query-independent weights summed to 0.55 against relevance's 0.45, and they
     // are mutually correlated, so one memory collected nearly all of them at once.
     // Priors now multiply relevance instead of adding to it, so there is no
     // additive budget to compare — asserted here so a future revert to a single
     // flat SCORING_WEIGHTS object trips this test.
-    expect(
-      (async () => {
-        const mod = (await import('../src/config.js')) as Record<string, unknown>;
-        return 'SCORING_WEIGHTS' in mod;
-      })(),
-    ).resolves.toBe(false);
+    const mod = (await import('../src/config.js')) as Record<string, unknown>;
+    expect('SCORING_WEIGHTS' in mod).toBe(false);
   });
 });

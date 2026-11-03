@@ -15,16 +15,18 @@ import importlib
 memory_decay = importlib.import_module("memory-decay")
 
 
-class TestDecayMath:
-    """Verify thermal decay constants and math."""
+class TestSnapshotRetention:
+    """Verify the constants this script still owns.
 
-    def test_decay_rate_reduces_temperature(self) -> None:
-        rate = memory_decay.DECAY_RATE
-        assert 0 < rate < 1
-        assert rate == 0.85
-
-    def test_decay_threshold_is_24_hours(self) -> None:
-        assert memory_decay.DECAY_THRESHOLD_HOURS == 24
+    The decay-arithmetic tests that lived here were removed with the origin_host fix: this
+    script no longer defines decay behaviour, it calls
+    public.memory_thermal_decay(). DECAY_RATE and DECAY_THRESHOLD_HOURS were
+    inputs to a query that no longer exists, and asserting them here would have
+    meant keeping dead constants alive purely to satisfy a test. The real
+    contract — those values reaching the SQL — is pinned by
+    tests/test_thermal_decay_migration.py, which reads them from src/config.ts
+    and asserts they appear in the migration.
+    """
 
     def test_max_snapshots_is_7(self) -> None:
         # Lowered 30->7: Postgres is the real safety net.
@@ -59,13 +61,6 @@ class TestGetDatabaseUrlTargeting:
         (tmp_path / ".env.supabase").write_text("DATABASE_URL=postgresql://u:p@pooler:6543/db\n")
         monkeypatch.setattr(memory_decay, "PROJECT_DIR", tmp_path)
         assert "pooler" in memory_decay.get_database_url()
-
-    def test_decay_converges_to_cold(self) -> None:
-        """After enough decays, temperature should approach 0."""
-        temp = 1.0
-        for _ in range(50):
-            temp = max(0.0, temp * memory_decay.DECAY_RATE)
-        assert temp < 0.001
 
 
 class TestGetDatabaseUrl:
