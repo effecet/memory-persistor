@@ -7,6 +7,7 @@
  */
 import { db } from './db.js';
 import { sql } from 'drizzle-orm';
+import { entities, memoryRelations } from './schema.js';
 
 // ── Relation ontology ──────────────────────────────────────────────────────
 
@@ -263,4 +264,43 @@ export async function detectCommunities(): Promise<Community[]> {
   }
 
   return communities;
+}
+
+// ── Mermaid projection ──────────────────────────────────────────────────────
+
+/**
+ * The whole graph as a Mermaid flowchart: nodes labelled name + type and
+ * coloured by thermal tier, edges labelled with their relation type. Shared by
+ * the `graph` tool and the `memory://graph` resource (the resources change, toolsets). Read-only.
+ */
+export async function renderGraphMermaid(): Promise<string> {
+  const [allEntities, allRelations] = await Promise.all([
+    db.select({ id: entities.id, name: entities.name, type: entities.type, tier: entities.tier }).from(entities),
+    db
+      .select({ fromId: memoryRelations.fromId, toId: memoryRelations.toId, relationType: memoryRelations.relationType })
+      .from(memoryRelations),
+  ]);
+  if (allEntities.length === 0) return 'No memories found.';
+
+  const lines: string[] = ['flowchart LR'];
+  lines.push('  classDef hot fill:#ff6b6b,stroke:#c0392b,color:#fff');
+  lines.push('  classDef warm fill:#f39c12,stroke:#e67e22,color:#fff');
+  lines.push('  classDef cold fill:#3498db,stroke:#2980b9,color:#fff');
+
+  const idMap = new Map<string, string>();
+  for (const e of allEntities) {
+    const shortId = e.id.replace(/-/g, '').slice(0, 8);
+    idMap.set(e.id, shortId);
+    // Escape quotes and limit label length
+    const safeName = (e.name || '').replace(/"/g, "'").slice(0, 40);
+    lines.push(`  ${shortId}["${safeName}\\n(${e.type})"]`);
+    lines.push(`  class ${shortId} ${(e.tier || 'COLD').toLowerCase()}`);
+  }
+
+  for (const r of allRelations) {
+    const from = idMap.get(r.fromId);
+    const to = idMap.get(r.toId);
+    if (from && to) lines.push(`  ${from} -->|${r.relationType}| ${to}`);
+  }
+  return lines.join('\n');
 }

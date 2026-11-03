@@ -6,9 +6,11 @@
  * DB functions use the shared connection pool.
  */
 import { db } from './db.js';
+import { CategorizedError } from './errors.js';
 import { entities, memoryRelations, memoryVersions } from './schema.js';
 import { eq, sql, desc } from 'drizzle-orm';
 import { resolveEmbeddingForTextChange } from './embed.js';
+import { isVolatile, withVolatileTag } from './claim-contract.js';
 
 // ── Confidence scoring (pure function) ──────────────────────────────────────
 
@@ -106,14 +108,63 @@ export async function findDedupCandidates(
 /**
  * Snapshot the current state of a memory before an update.
  * Saves name, observations, tags, importance to memory_versions.
+ *
+ * This is `INSERT ... SELECT ... WHERE id = $1`, so a nonexistent id inserts
+ * ZERO rows and does NOT throw. Callers that need to know whether history was
+ * actually recorded must read the returned count — "it didn't throw" is not
+ * the same as "a version exists". Verified against PG16 on 2026-08-31.
+ *
+ * @returns the number of version rows written (0 or 1).
  */
-export async function snapshotVersion(id: string): Promise<void> {
-  await db.execute(sql`
+export async function snapshotVersion(id: string): Promise<number> {
+  const result = await db.execute(sql`
     INSERT INTO public.memory_versions (memory_id, name, observations, tags, importance)
     SELECT id, name, observations, tags, importance
     FROM public.entities
     WHERE id = ${id}
   `);
+  return result.rowCount ?? 0;
+}
+
+/**
+ * Snapshot a memory, treating a failure as non-fatal but NEVER silent.
+ *
+ * A history write must not block a user's edit — that policy predates this
+ * function and is deliberate. What this adds is visibility: the previous
+ * inline `catch {}` in the `update` handler destroyed an edit's history with
+ * no log line, no counter, and no way to detect it afterwards.
+ *
+ * `memory_versions` is the only audit trail this system has, and an audit
+ * trail that fails open *and* silently is worse than none — it invites the
+ * inference that zero version rows means a memory was never edited. That
+ * inference produced a wrong conclusion on 2026-08-28.
+ *
+ * Logs to **stderr**, never stdout: stdout is the MCP JSON-RPC transport, and
+ * writing to it corrupts the stream (see the dotenv-banner incident, 2026-08-18).
+ *
+ * @returns true only if a version row was actually written. A failure returns
+ * false, and so does a snapshot of an id that no longer exists — which writes
+ * nothing without throwing. Both mean the same thing to a caller: this edit's
+ * prior state is not in `memory_versions`.
+ */
+export async function snapshotVersionSafe(id: string): Promise<boolean> {
+  try {
+    const written = await snapshotVersion(id);
+    if (written === 0) {
+      console.error(
+        `[intelligence] snapshotVersion wrote no row for entity ${id} — the entity ` +
+          `was not found, so this edit's prior state is NOT in memory_versions.`,
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(
+      `[intelligence] snapshotVersion failed for entity ${id} — the update ` +
+        `proceeds, but this edit's prior state was NOT recorded in memory_versions: ${err}`,
+    );
+    return false;
+  }
 }
 
 export interface VersionRecord {
@@ -183,7 +234,7 @@ export async function mergeMemories(
   const [target] = await db.select(mergeCols).from(entities).where(eq(entities.id, targetId)).limit(1);
 
   if (!source || !target) {
-    throw new Error(`Memory not found: ${!source ? sourceId : targetId}`);
+    throw new CategorizedError('validation', `Memory not found: ${!source ? sourceId : targetId}`);
   }
 
   // Merge observations (append)
@@ -192,15 +243,21 @@ export async function mergeMemories(
     `\n---\n[Merged from: ${source.name}]\n${source.observations || ''}`,
   ].join('');
 
-  // Union tags
-  const mergedTags = [...new Set([...(target.tags || []), ...(source.tags || [])])];
+  // Union tags, then the claim contract: the date check reads the whole
+  // body, so joining two bodies can gain or lose the flag — recompute it. No
+  // reject: a merge must not fail on the combination of two accepted bodies.
+  const unionTags = [...new Set([...(target.tags || []), ...(source.tags || [])])];
+  const mergedTags = withVolatileTag(unionTags, isVolatile(mergedObservations));
+  const tagsChanged =
+    mergedTags.length !== (target.tags || []).length ||
+    mergedTags.some((t) => !(target.tags || []).includes(t));
 
   // Keep higher importance
   const mergedImportance = Math.max(target.importance ?? 0.5, source.importance ?? 0.5);
 
   const mergedFields: string[] = [];
   if (source.observations) mergedFields.push('observations');
-  if (source.tags && source.tags.length > 0) mergedFields.push('tags');
+  if (tagsChanged) mergedFields.push('tags');
   if ((source.importance ?? 0.5) > (target.importance ?? 0.5)) mergedFields.push('importance');
 
   // The merge always appends source text onto target's observations, so the
@@ -217,46 +274,79 @@ export async function mergeMemories(
     mergedFields.push('embedding');
   }
 
-  // Update target
-  await db
-    .update(entities)
-    .set(updateSet)
-    .where(eq(entities.id, targetId));
+  // The three writes are ONE transaction (the error contract gate). Without it, a connection
+  // drop after the target update left the merged text applied with the source
+  // still present — and the contract now tells the caller a transient failure
+  // is retryable, so the retry appended the source text a second time.
+  const edgesTransferred = await db.transaction(async (tx) => {
+    // Update target
+    await tx
+      .update(entities)
+      .set(updateSet)
+      .where(eq(entities.id, targetId));
 
-  // Transfer edges from source to target (avoiding self-loops and duplicates)
-  const transferResult = await db.execute(sql`
-    WITH source_edges AS (
-      SELECT id, from_id, to_id, relation_type, weight
-      FROM public.memory_relations
-      WHERE from_id = ${sourceId} OR to_id = ${sourceId}
-    ),
-    rewritten AS (
-      SELECT
-        CASE WHEN from_id = ${sourceId} THEN ${targetId}::uuid ELSE from_id END AS new_from,
-        CASE WHEN to_id = ${sourceId} THEN ${targetId}::uuid ELSE to_id END AS new_to,
-        relation_type,
-        weight
-      FROM source_edges
-    ),
-    filtered AS (
-      SELECT new_from, new_to, relation_type, weight
-      FROM rewritten
-      WHERE new_from != new_to
-        AND NOT EXISTS (
-          SELECT 1 FROM public.memory_relations existing
-          WHERE existing.from_id = rewritten.new_from
-            AND existing.to_id = rewritten.new_to
-            AND existing.relation_type = rewritten.relation_type
-        )
-    )
-    INSERT INTO public.memory_relations (from_id, to_id, relation_type, weight)
-    SELECT new_from, new_to, relation_type, weight FROM filtered
-  `);
+    // Transfer edges from source to target (avoiding self-loops and duplicates)
+    const transferResult = await tx.execute(sql`
+      WITH source_edges AS (
+        SELECT id, from_id, to_id, relation_type, weight, provenance
+        FROM public.memory_relations
+        WHERE from_id = ${sourceId} OR to_id = ${sourceId}
+      ),
+      rewritten AS (
+        SELECT
+          CASE WHEN from_id = ${sourceId} THEN ${targetId}::uuid ELSE from_id END AS new_from,
+          CASE WHEN to_id = ${sourceId} THEN ${targetId}::uuid ELSE to_id END AS new_to,
+          relation_type,
+          weight,
+          provenance
+        FROM source_edges
+      ),
+      -- The duplicate filter below keeps the TARGET's row when both sides hold
+      -- the same (from, to, type). If the source asserted it and the target
+      -- only inferred it, keep the stronger claim — otherwise merge would
+      -- silently downgrade an assertion to a guess. A data-modifying CTE runs
+      -- whether or not it is referenced, and it touches only rows that already
+      -- exist, so it is disjoint from the INSERT below.
+      upgraded AS (
+        UPDATE public.memory_relations existing
+        SET provenance = 'asserted'
+        FROM rewritten rw
+        WHERE rw.provenance = 'asserted'
+          AND existing.provenance = 'inferred'
+          AND existing.from_id = rw.new_from
+          AND existing.to_id = rw.new_to
+          AND existing.relation_type = rw.relation_type
+      ),
+      filtered AS (
+        SELECT new_from, new_to, relation_type, weight, provenance
+        FROM rewritten
+        WHERE new_from != new_to
+          AND NOT EXISTS (
+            SELECT 1 FROM public.memory_relations existing
+            WHERE existing.from_id = rewritten.new_from
+              AND existing.to_id = rewritten.new_to
+              AND existing.relation_type = rewritten.relation_type
+          )
+      )
+      INSERT INTO public.memory_relations (from_id, to_id, relation_type, weight, provenance)
+      SELECT new_from, new_to, relation_type, weight, provenance FROM filtered
+      -- The NOT EXISTS above already filters, but it reads the snapshot: an
+      -- identical edge committed concurrently would otherwise fail the merge
+      -- on the unique index (drizzle/0017). No target, so valid without it.
+      -- Known gap: if that concurrent edge is inferred and ours asserted, the
+      -- inferred row wins, since "upgraded" read the same snapshot. Fixing it
+      -- needs DO UPDATE with a conflict target, which errors on a database
+      -- without the index. Without ON CONFLICT the same race fails the merge
+      -- on an indexed database and writes a duplicate on an unindexed one.
+      ON CONFLICT DO NOTHING
+    `);
 
-  const edgesTransferred = transferResult.rowCount ?? 0;
+    const transferred = transferResult.rowCount ?? 0;
 
-  // Delete source (cascades its remaining edges)
-  await db.delete(entities).where(eq(entities.id, sourceId));
+    // Delete source (cascades its remaining edges)
+    await tx.delete(entities).where(eq(entities.id, sourceId));
+    return transferred;
+  });
 
   return {
     targetId,

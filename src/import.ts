@@ -13,6 +13,8 @@ import { db, closeDb } from './db.js';
 import { entities } from './schema.js';
 import { eq, and } from 'drizzle-orm';
 import { CLAUDE_DIR } from './config.js';
+import { isFilenameStyleName, collectProjectSources, listMemoryFiles } from './file-sync.js';
+import { prepareImportRow } from './claim-contract.js';
 
 const STOP_TAGS = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'not', 'has', 'are', 'was']);
 
@@ -23,20 +25,6 @@ interface ParsedMemory {
   body: string;
   source: string;
   filePath: string;
-}
-
-/**
- * Decode a Claude Code project directory name back to a filesystem path.
- * "-Users-foo-bar" → "/Users/foo/bar"
- *
- * Note: this inverse is best-effort only — encoding is many-to-one by design.
- * `encodeProjectPath` in file-sync.ts replaces BOTH `/` and `.` with `-`, so
- * both `/Users/foo.bar` and `/Users/foo-bar` encode to `-Users-foo-bar` and
- * decoding can't tell them apart. The returned `source` is used as a stable
- * key for dedup during seed; downstream writes re-encode it consistently.
- */
-function decodeProjectPath(encoded: string): string {
-  return '/' + encoded.replace(/^-/, '').replace(/-/g, '/');
 }
 
 /**
@@ -74,19 +62,18 @@ async function main() {
     return;
   }
 
-  const projectDirs = readdirSync(projectsDir, { withFileTypes: true })
-    .filter(d => d.isDirectory());
+  // Sources are resolved against the filesystem, never decoded: the encoding
+  // is lossy and the old string decode seeded mangled sources. A dir
+  // that does not resolve on THIS machine (another host's path, a deleted or
+  // moved checkout) is skipped and reported, never imported under a guess.
+  const { resolved, skipped: skippedDirs } = collectProjectSources(projectsDir);
 
   let imported = 0;
   let skipped = 0;
 
-  for (const dir of projectDirs) {
-    const memoryDir = join(projectsDir, dir.name, 'memory');
-    if (!existsSync(memoryDir)) continue;
-
-    const source = decodeProjectPath(dir.name);
-    const files = readdirSync(memoryDir)
-      .filter(f => f.endsWith('.md') && f !== 'MEMORY.md');
+  for (const { dir, source } of resolved) {
+    const memoryDir = join(projectsDir, dir, 'memory');
+    const files = listMemoryFiles(memoryDir);
 
     for (const file of files) {
       const filePath = join(memoryDir, file);
@@ -121,12 +108,38 @@ async function main() {
         continue;
       }
 
+      // Third write path to entities.name, and the one that most likely created
+      // the nine filename-stem names in the first place: it takes `name:` verbatim
+      // from frontmatter that was itself filename-derived. Guarding only
+      // remember/update would leave `make seed` free to reintroduce them — which is
+      // structurally the defect that retired memory_name_guard.py on 2026-08-08
+      // (it fired on remember but never on update, so the corpus drifted in through
+      // the unguarded path). Skips rather than aborts, so one bad file cannot
+      // stop a whole import.
+      if (isFilenameStyleName(parsed.name)) {
+        console.error(
+          `  skip: ${parsed.name} (filename-stem name, not a title — see an earlier issue)`,
+        );
+        skipped++;
+        continue;
+      }
+
+      // Same claim contract as remember/update, for the same reason as the
+      // name guard above: a rule on some write paths is not a rule. The decision
+      // is prepareImportRow (tested); this module runs main() on load.
+      const row = prepareImportRow(parsed.body, parsed.description, tags);
+      if ('skip' in row) {
+        console.error(`  skip: ${parsed.name} (${row.skip})`);
+        skipped++;
+        continue;
+      }
+
       try {
         await db.insert(entities).values({
           name: parsed.name,
           type,
-          observations: parsed.body || parsed.description,
-          tags,
+          observations: row.observations,
+          tags: row.tags,
           source: parsed.source,
           importance: 0.5,
           temperature: 0.5,
@@ -134,7 +147,7 @@ async function main() {
           accessCount: 0,
         });
         imported++;
-        console.log(`  imported: ${parsed.name} [${type}] from ${dir.name}`);
+        console.log(`  imported: ${parsed.name} [${type}] from ${dir}`);
       } catch (err) {
         console.error(`  error importing ${file}:`, err);
         skipped++;
@@ -143,6 +156,11 @@ async function main() {
   }
 
   console.log(`\nDone: ${imported} imported, ${skipped} skipped`);
+  if (skippedDirs.length > 0) {
+    const total = skippedDirs.reduce((n, s) => n + s.files, 0);
+    console.log(`Not imported: ${skippedDirs.length} project dir(s), ${total} memory file(s) — no unique local path:`);
+    for (const s of skippedDirs) console.log(`  ${s.reason.padEnd(10)} ${s.dir} (${s.files} files)`);
+  }
   await closeDb();
 }
 

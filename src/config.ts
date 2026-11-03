@@ -35,8 +35,6 @@
 // 0.334. Removing centrality entirely left the wrong hit ahead 0.469 to 0.284,
 // which is why every fix that only reweighted a single signal would have missed.
 //
-// See the design notes.
-//
 // Within-group ratios are IDENTICAL to the deleted flat SCORING_WEIGHTS, so this change is
 // purely structural and the benchmark can attribute its whole effect to the
 // model rather than to re-tuning. Written as divisions by the old group totals
@@ -94,6 +92,9 @@ export const PRIOR_WEIGHTS = {
  * do not reason it out on paper.
  */
 export const PRIOR_ALPHA = 0.2;
+
+// Minimum trigram similarity to include in results (hybrid WHERE clause)
+export const TRIGRAM_THRESHOLD = 0.2;
 
 // ── Semantic embeddings (pgvector) ───────────────────────────────────────
 // Local bge-small via @huggingface/transformers (ONNX, in-process). Vectors
@@ -208,7 +209,7 @@ export const RESPONSE_CAP_BYTES = 30_000;
  * them. Do not apply this to fitRows.
  *
  * Load-bearing, not cosmetic: `JSON.stringify(x, null, 2)` inflates these
- * payloads ~26%. the health-cap change's first cut sized `health`'s budgets against COMPACT
+ * payloads ~26%. The health-cap change's first cut sized `health`'s budgets against COMPACT
  * bytes while the handler emitted indented JSON — measured 25_292 B compact
  * against 31_881 B emitted, i.e. 1_881 B over the very cap the change existed
  * to respect, with every test green. Any byte budget MUST be measured with the

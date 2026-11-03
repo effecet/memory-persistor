@@ -13,8 +13,9 @@ import {
   closeTestDb,
 } from './helpers.js';
 
-// Replicate the graph-building logic from mcp-server.ts so we can verify
-// the Mermaid output end-to-end without importing the MCP handler.
+// Replicate the graph-building logic from src/mcp-tools.ts so we can verify
+// the Mermaid output at the query layer. (The handler itself is reachable via
+// tests/integration/mcp-harness.ts.)
 function buildMermaid(
   allEntities: Array<{ id: string; name: string; type: string; tier: string | null }>,
   allRelations: Array<{ fromId: string; toId: string; relationType: string }>,
@@ -75,7 +76,7 @@ describe('graph', () => {
     });
     createdIds.push(memoryB.id);
 
-    // Query the same way mcp-server.ts does
+    // Query the same way src/mcp-tools.ts does
     const allEntities = await testDb
       .select({
         id: entities.id,

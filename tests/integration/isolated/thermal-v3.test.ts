@@ -7,8 +7,8 @@
  * Expected to FAIL until Phase 3 implementation is complete.
  */
 import { describe, it, expect, afterAll, afterEach } from 'vitest';
-import { bump, decayAll } from '../../src/thermal.js';
-import { BUMP_AMOUNT, DECAY_RATE } from '../../src/config.js';
+import { bump, decayAll } from '../../../src/thermal.js';
+import { BUMP_AMOUNT, DECAY_RATE } from '../../../src/config.js';
 import {
   testDb,
   insertTestMemory,
@@ -16,8 +16,8 @@ import {
   cleanupMemories,
   getMemory,
   closeTestDb,
-} from './helpers.js';
-import { entities } from '../../src/schema.js';
+} from '../helpers.js';
+import { entities } from '../../../src/schema.js';
 import { eq, sql } from 'drizzle-orm';
 
 const PREFIX = 'v3-thermal-';

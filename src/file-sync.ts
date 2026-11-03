@@ -15,9 +15,10 @@
  *   ---
  *   <observations>
  */
-import { readFileSync, readdirSync, writeFileSync, unlinkSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, unlinkSync, existsSync, mkdirSync, statSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
-import { CLAUDE_DIR } from './config.js';
+import { CLAUDE_DIR, MEMORY_TYPES } from './config.js';
+import { CategorizedError } from './errors.js';
 
 interface MemoryEntity {
   id: string;
@@ -96,6 +97,138 @@ export function encodeProjectPath(source: string): string {
   return source.replace(/\//g, '-').replace(/\./g, '-');
 }
 
+/** Why a project directory name could not be turned back into a path. */
+export type ProjectPathSkip = 'none' | 'ambiguous' | 'unreadable' | 'too-large';
+export type ProjectPathResolution = { path: string } | { skip: ProjectPathSkip };
+
+/** Directory visits after which resolution gives up (fails closed as 'too-large'). */
+export const RESOLVE_MAX_VISITS = 10_000;
+
+/**
+ * Inverse of encodeProjectPath, answered by the filesystem.
+ *
+ * The encoding is lossy — `/`, `.` and a literal `-` all become `-` — so no
+ * string rule can invert it; the old one turned every `-` into `/` and seeded
+ * sources like `/Users/jane/doe/Downloads/maple/leaf/fabric`. This
+ * walks the real tree instead: at each level it descends only into child
+ * directories whose own encoding is a prefix of the remaining name, so the
+ * work is bounded by what exists on disk (enumerating separators per dash is
+ * 3^n and hung on a real 20-dash name).
+ *
+ * Symlinked directories are followed — Claude Code may record a cwd under one
+ * (macOS /tmp → /private/tmp). A cycle cannot loop forever: every descent
+ * consumes part of the name, and RESOLVE_MAX_VISITS caps the total work.
+ *
+ * Fails closed with a reason, never a guess:
+ *   none       — no real directory encodes to `encoded`
+ *   ambiguous  — two or more do
+ *   unreadable — a branch that could still match could not be listed (EACCES,
+ *                TCC…), so a second match might be hidden; a unique answer
+ *                from the readable part would be a guess
+ *   too-large  — RESOLVE_MAX_VISITS exceeded
+ * Reads are synchronous and start at `/`; the only caller is the `make seed` CLI.
+ *
+ * @param root @internal test seam; the returned path is always absolute from `/`.
+ * @param maxVisits @internal test seam for the RESOLVE_MAX_VISITS cap.
+ */
+export function resolveProjectPathDetailed(
+  encoded: string,
+  root = '/',
+  maxVisits = RESOLVE_MAX_VISITS,
+): ProjectPathResolution {
+  if (!encoded.startsWith('-')) return { skip: 'none' };
+  const hits: string[] = [];
+  let visits = 0;
+  let unreadable = false;
+  const isDirEntry = (relPath: string, entry: Dirent): boolean => {
+    if (entry.isDirectory()) return true;
+    if (!entry.isSymbolicLink()) return false;
+    try {
+      return statSync(join(root, relPath, entry.name)).isDirectory();
+    } catch (err) {
+      // A dangling link is simply not a directory. Anything else (EACCES,
+      // ELOOP…) means a target we could not inspect might have matched.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') unreadable = true;
+      return false;
+    }
+  };
+  const walk = (relPath: string, rest: string): void => {
+    if (hits.length > 1 || ++visits > maxVisits) return;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(join(root, relPath), { withFileTypes: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') unreadable = true;
+      return;
+    }
+    for (const entry of entries) {
+      if (!isDirEntry(relPath, entry)) continue;
+      const encodedName = encodeProjectPath(entry.name);
+      const childPath = `${relPath}/${entry.name}`;
+      if (rest === encodedName) hits.push(childPath);
+      else if (rest.startsWith(`${encodedName}-`)) walk(childPath, rest.slice(encodedName.length + 1));
+    }
+  };
+  walk('', encoded.slice(1));
+  if (visits > maxVisits) return { skip: 'too-large' };
+  if (hits.length > 1) return { skip: 'ambiguous' };
+  if (unreadable) return { skip: 'unreadable' };
+  return hits.length === 1 ? { path: hits[0] } : { skip: 'none' };
+}
+
+/**
+ * resolveProjectPathDetailed, collapsed to the path or null.
+ * @param root @internal test seam.
+ */
+export function resolveProjectPath(encoded: string, root = '/'): string | null {
+  const resolution = resolveProjectPathDetailed(encoded, root);
+  return 'path' in resolution ? resolution.path : null;
+}
+
+/** The memory markdown files in `memoryDir` (index excluded); [] if unreadable. */
+export function listMemoryFiles(memoryDir: string): string[] {
+  try {
+    return readdirSync(memoryDir).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md');
+  } catch {
+    return []; // unreadable or not a directory: nothing to import or count
+  }
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory(); // follows symlinks
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Every project directory under `projectsDir` that holds a `memory/` folder,
+ * split into those that resolve to a real source and those skipped with a
+ * reason and a file count. `make seed` imports only the former and reports
+ * the latter. Symlinked project dirs count like real ones.
+ * @param root @internal test seam.
+ */
+export function collectProjectSources(
+  projectsDir: string,
+  root = '/',
+): {
+  resolved: { dir: string; source: string }[];
+  skipped: { dir: string; reason: ProjectPathSkip; files: number }[];
+} {
+  const resolved: { dir: string; source: string }[] = [];
+  const skipped: { dir: string; reason: ProjectPathSkip; files: number }[] = [];
+  for (const dir of readdirSync(projectsDir)) {
+    const memoryDir = join(projectsDir, dir, 'memory');
+    if (!isDirectory(memoryDir)) continue;
+    const resolution = resolveProjectPathDetailed(dir, root);
+    if ('path' in resolution) resolved.push({ dir, source: resolution.path });
+    else skipped.push({ dir, reason: resolution.skip, files: listMemoryFiles(memoryDir).length });
+  }
+  return { resolved, skipped };
+}
+
 /**
  * Slugify a memory name for use as a filename.
  * "User prefers f-strings" → "user-prefers-f-strings"
@@ -111,6 +244,72 @@ function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 120);
+}
+
+/**
+ * True when a memory `name` is actually an old filename stem — `user_writing_style`
+ * rather than a title.
+ *
+ * Two things break when one of these lands. The MEMORY.md index line is
+ * `- <type>: <name> — <description>`, so it renders as a filename at session start,
+ * visibly wrong beside its neighbours. And prose-name matching against it
+ * trigram-scores ~0.32-0.39 — low enough that an orphan-file audit on 2026-08-28
+ * concluded five such entities did not exist, when each was sitting in the corpus.
+ * Acting on that would have created duplicates.
+ *
+ * Two conditions must BOTH hold, and each exists to kill a different false positive:
+ *
+ * 1. **A type word followed by an underscore.** Names that merely begin with a
+ *    type WORD are legitimate and common — "User prefers short answers" is a
+ *    normal title. Its file is `<type>_user-prefers-short-answers.md`, which
+ *    on disk looks exactly like the doubled-prefix tell an earlier issue proposes using.
+ *    Measured 2026-09-01: that on-disk pattern matches 16 files, only 9 of which are
+ *    actually malformed. Match on the name, never on the filename shape.
+ *
+ * 2. **Stem-shaped END TO END** (`[a-z0-9_]*$`), not merely stem-prefixed. This is
+ *    the difference between a guard and a nuisance: `user_id must never be null`,
+ *    `fact_orders grain is one row per line item`, `pattern_matching beats regex
+ *    here` and `user_agent header must be set` are all legitimate titles — four of
+ *    the seven type words are common compound-token heads, and this is a
+ *    data-engineering stack where `fact_` is the standard dimensional prefix. A
+ *    prefix-only match hard-rejected every one of them with no escape hatch.
+ *    Anchoring to `$` clears them all while still catching all nine live offenders,
+ *    none of which contain whitespace.
+ *
+ * Derived from MEMORY_TYPES rather than a hardcoded list so a newly added type
+ * cannot silently escape the guard. Note that the TEST for this derivation cannot
+ * fail from a new type — test and regex expand from the same constant in lockstep;
+ * what it actually pins is that the list stays derived rather than hardcoded.
+ */
+const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const FILENAME_STYLE_NAME = new RegExp(
+  `^(?:${MEMORY_TYPES.map(escapeRegex).join('|')})_[a-z0-9_]*$`,
+  'i',
+);
+
+export function isFilenameStyleName(name: string): boolean {
+  // NFKC folds fullwidth `＿` (U+FF3F) onto `_`, and stripping format chars
+  // removes zero-width joiners — both otherwise slip past the pattern while
+  // still slugifying to the identical malformed filename.
+  const normalized = name.normalize('NFKC').replace(/\p{Cf}/gu, '').trim();
+  return FILENAME_STYLE_NAME.test(normalized);
+}
+
+/**
+ * Throw the canonical rejection for a filename-stem name. Single source of the
+ * message so `remember` and `update` cannot drift apart on the same rule.
+ */
+export function assertMemoryNameIsTitle(name: string): void {
+  if (isFilenameStyleName(name)) {
+    throw new CategorizedError(
+      'validation',
+      `Memory name "${name}" looks like a filename stem, not a title. The MEMORY.md ` +
+        `index renders the name directly, and prose queries trigram-match a stem poorly ` +
+        `enough to be missed entirely. Pass a real title — the type is already a separate ` +
+        `field and the filename is derived for you.`,
+    );
+  }
 }
 
 /**
@@ -298,7 +497,7 @@ export async function removeFile(
  *
  * `merge` deletes the source entity's PG row but, before this, left the
  * source's slug-derived `.md` file and its MEMORY.md line orphaned whenever
- * source and target slugged to different filenames (issue #15). This deletes
+ * source and target slugged to different filenames. This deletes
  * the source's file(s) + index line, then (re)writes the surviving target.
  *
  * Ordering is load-bearing: removeFile(source) MUST run before

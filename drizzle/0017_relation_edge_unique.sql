@@ -1,7 +1,7 @@
 -- 0017_relation_edge_unique.sql
 --
 -- One row per (from_id, to_id, relation_type). The relate guard from
--- 2026-10-23 (pending 6e63fc1c) stops repeat claims in the handler, but it is
+-- 2026-10-23 stops repeat claims in the handler, but it is
 -- check-then-insert, so two concurrent identical relates can still both
 -- insert, and machines on older code keep writing duplicates. A duplicate
 -- double-counts in centrality. Measured on a production database 2026-10-25: 2,162 edges,

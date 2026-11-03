@@ -14,7 +14,13 @@ import {
 } from './helpers.js';
 import { logEvent } from '../../src/events.js';
 import { getAnalytics, getHealth } from '../../src/observability.js';
-import { DEDUP_COSINE_THRESHOLD } from '../../src/config.js';
+import {
+  DEDUP_COSINE_THRESHOLD,
+  RESPONSE_CAP_BYTES,
+  RESPONSE_JSON_INDENT,
+  HEALTH_ORPHAN_LIMIT,
+  HEALTH_DEDUP_LIMIT,
+} from '../../src/config.js';
 import { events } from '../../src/schema.js';
 import { eq, sql } from 'drizzle-orm';
 
@@ -224,6 +230,129 @@ describe('getHealth', () => {
       expect(entry.count).toBeGreaterThan(0);
     }
   });
+});
+
+// ── orphan capping ─────────────────────────────────────────────────
+
+describe('getHealth — orphans are capped without losing the count', () => {
+  it('keeps orphanCount exact while the list is capped, and says it truncated', async () => {
+    // orphanCount used to be `orphans.rows.length`. Adding a LIMIT without
+    // COUNT(*) OVER() would silently redefine it as the CAPPED number — a
+    // truncated list that reads as a complete one, which is the defect the health-cap change is
+    // about, one level down. Seeding past the cap is the only way to see it.
+    const seeded = HEALTH_ORPHAN_LIMIT + 5;
+    for (let i = 0; i < seeded; i++) {
+      const m = await insertTestMemory({ name: `orphan-cap-probe-${i}`, type: 'fact' });
+      createdIds.push(m.id);
+    }
+
+    const health = await getHealth();
+
+    expect(health.orphans.length).toBeLessThanOrEqual(HEALTH_ORPHAN_LIMIT);
+    // The count is the load-bearing part and must survive the cap intact.
+    expect(health.orphanCount).toBeGreaterThanOrEqual(seeded);
+    expect(health.orphanCount).toBeGreaterThan(health.orphans.length);
+    expect(health.orphansTruncated).toBe(true);
+
+    // …and the real payload fits the cap, measured the way the MCP boundary
+    // emits it. Folded in here rather than given its own test: a second
+    // getHealth() costs another community detection and pgvector self-join to
+    // assert a property this seed already creates.
+    expect(
+      Buffer.byteLength(JSON.stringify(health, null, RESPONSE_JSON_INDENT), 'utf8'),
+    ).toBeLessThanOrEqual(RESPONSE_CAP_BYTES);
+  });
+
+  it('does not claim truncation when everything fits', async () => {
+    // Negative control: without it the flag could be hardcoded true and the
+    // test above would still pass.
+    const m = await insertTestMemory({ name: 'orphan-nocap-probe', type: 'fact' });
+    createdIds.push(m.id);
+
+    const health = await getHealth();
+
+    // Unconditional on purpose. Wrapped in `if (orphanCount <= LIMIT)` this
+    // passed silently the moment the DB carried more orphans than the cap —
+    // a negative control that stops controlling is worse than none.
+    expect(health.orphanCount).toBeLessThanOrEqual(HEALTH_ORPHAN_LIMIT);
+    expect(health.orphansTruncated).toBe(false);
+    expect(health.orphans.length).toBe(health.orphanCount);
+  });
+
+  it('getHealth ACTUALLY applies the cap, not just exports the helper', async () => {
+    // The wiring, not the mechanism. Deleting `enforceHealthCap(...)` from
+    // getHealth left the whole suite green: the unit tests drive the helper
+    // directly, and an ordinary seed never gets near the cap, so nothing
+    // noticed. Long names are the cheap way to force a real trim — five rows
+    // at 8 KB blow a 30 KB budget that 100 ordinary rows sit comfortably
+    // inside, which is also the reason a row cap alone cannot bound bytes.
+    for (let i = 0; i < 5; i++) {
+      const m = await insertTestMemory({
+        name: `orphan-huge-${i}-${'x'.repeat(8_000)}`,
+        type: 'fact',
+      });
+      createdIds.push(m.id);
+    }
+
+    const health = await getHealth();
+
+    expect(
+      Buffer.byteLength(JSON.stringify(health, null, RESPONSE_JSON_INDENT), 'utf8'),
+    ).toBeLessThanOrEqual(RESPONSE_CAP_BYTES);
+    // It had to drop rows to get there, and it says so.
+    expect(health.orphansTruncated).toBe(true);
+    expect(health.orphans.length).toBeLessThan(health.orphanCount);
+  });
+
+  it('keeps graph.degree.zeroCount in agreement with orphanCount', async () => {
+    // Both count entities with no edge, from two separate queries, and the
+    // GraphShape docstring asserts they are equal. orphanCount just gained a
+    // new derivation (COUNT(*) OVER() rather than array length), so the
+    // invariant is worth executing rather than trusting.
+    //
+    // SEEDED deliberately: run on the post-cleanup database this asserted
+    // 0 === 0 and exercised neither the window function nor the LIMIT.
+    for (let i = 0; i < 3; i++) {
+      const m = await insertTestMemory({ name: `zerocount-probe-${i}`, type: 'fact' });
+      createdIds.push(m.id);
+    }
+
+    const health = await getHealth();
+
+    expect(health.orphanCount).toBeGreaterThanOrEqual(3);
+    expect(health.graph.degree.zeroCount).toBe(health.orphanCount);
+  });
+
+  it('caps dedupCandidates at HEALTH_DEDUP_LIMIT and flags the truncation', async () => {
+    // The dedup half had no coverage at all: `dedupCandidatesTruncated = false`
+    // left the unit suite 13/13 green, and swapping `LIMIT ${HEALTH_DEDUP_LIMIT}`
+    // for a literal 100 was invisible to every test — the exact defect class
+    // the health-cap change was opened on, reintroduced inside its own fix.
+    //
+    // 10 memories on one shared basis vector are mutually identical under
+    // cosine, giving C(10,2) = 45 pairs — more than the cap of 40.
+    for (let i = 0; i < 10; i++) {
+      const m = await insertTestMemory({
+        name: `dedup-cap-probe-${i}`,
+        type: 'fact',
+        observations: `near duplicate observation body ${i}`,
+        embedding: basisEmbedding(42),
+      });
+      createdIds.push(m.id);
+    }
+
+    const health = await getHealth();
+
+    expect(health.dedupCandidateCount).toBeGreaterThan(HEALTH_DEDUP_LIMIT);
+    expect(health.dedupCandidates.length).toBeLessThanOrEqual(HEALTH_DEDUP_LIMIT);
+    expect(health.dedupCandidatesTruncated).toBe(true);
+    // And the payload still fits, measured as the boundary emits it.
+    expect(
+      Buffer.byteLength(JSON.stringify(health, null, RESPONSE_JSON_INDENT), 'utf8'),
+    ).toBeLessThanOrEqual(RESPONSE_CAP_BYTES);
+  });
+
+
 });
 
 // ── dedupCandidates (new field — Task 1) ─────────────────────────────────

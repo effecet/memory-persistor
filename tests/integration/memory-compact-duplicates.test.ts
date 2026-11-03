@@ -109,6 +109,7 @@ describe('memory-compact duplicates round-trip', () => {
       toId: b.id,
       relationType: 'related_to',
       weight: 1.0,
+      provenance: 'asserted', // [R] goes through the relate tool
     });
 
     const memA = await getMemory(a.id);
