@@ -47,7 +47,7 @@ INTEGRATION = REPO / "tests" / "integration"
 ISOLATED = INTEGRATION / "isolated"
 PACKAGE_JSON = REPO / "package.json"
 MAKEFILE = REPO / "Makefile"
-WORKFLOW = REPO / ".forgejo" / "workflows" / "integration.yml"
+WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 
 # The database the MAIN integration suite uses in CI, and the one the isolated
 # suite must use instead. Kept as literals so a rename has to touch this guard.

@@ -17,6 +17,11 @@ updates:
       # guard in tests/env-loading.test.ts. Stay on 17.x until that is resolved deliberately.
       - dependency-name: "dotenv"
         update-types: ["version-update:semver-major"]
+      # An alias of typescript@5 for tests/spawn-argv-scan.ts, which needs the
+      # JS compiler API that TypeScript 7 no longer ships. A major bump to 7
+      # would remove exactly what the alias exists for.
+      - dependency-name: "typescript-api"
+        update-types: ["version-update:semver-major"]
     groups:
       npm-dependencies:
         patterns:

@@ -26,11 +26,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-SCAN_ROOTS = (
-    REPO / "scripts",
-    REPO / "claude-config" / "hooks",
-    REPO / "claude-config" / "scripts",
-)
+SCAN_ROOTS = (REPO / "scripts",)
 
 
 def _is_psql_argv(node: ast.AST) -> bool:
@@ -227,7 +223,7 @@ SCRIPTS = sorted(
 def test_the_guard_actually_finds_call_sites():
     """A discovery guard that discovers nothing passes vacuously forever."""
     total = sum(len(_psql_calls(ast.parse(p.read_text()))) for p in SCRIPTS)
-    assert total >= 13, f"expected at least the 13 known psql call sites, found {total}"
+    assert total >= 6, f"expected at least the 6 known psql call sites, found {total}"
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: str(p.relative_to(REPO)))

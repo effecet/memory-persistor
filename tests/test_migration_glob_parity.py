@@ -50,10 +50,9 @@ EXPECTED_GLOB = "drizzle/*.sql"
 def _sources() -> list[Path]:
     out = [REPO / "Makefile"]
     for pat in (
-        ".forgejo/workflows/*.yml",
-        ".forgejo/workflows/*.yaml",
+        ".github/workflows/*.yml",
+        ".github/workflows/*.yaml",
         "scripts/*.sh",
-        "claude-config/scripts/*.sh",
     ):
         out.extend(sorted(REPO.glob(pat)))
     return [p for p in out if p.exists()]

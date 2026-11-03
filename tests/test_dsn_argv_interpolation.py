@@ -100,9 +100,7 @@ REPO = Path(__file__).resolve().parent.parent
 SCAN_SPECS: tuple[tuple[Path, str], ...] = (
     (REPO, "Makefile"),
     (REPO / "scripts", "*.sh"),
-    (REPO / "claude-config" / "hooks", "*.sh"),
-    (REPO / "claude-config" / "scripts", "*.sh"),
-    (REPO / ".forgejo" / "workflows", "*.yml"),
+    (REPO / ".github" / "workflows", "*.yml"),
 )
 
 #: A variable name that may hold a credential. Case-insensitive: shell
@@ -689,11 +687,11 @@ def test_each_scan_root_matches_files(root, pattern):
 def test_workflows_are_actually_scanned():
     """The regression cover for this commit's own workflow fixes.
 
-    Six reviewers independently found that omitting `.forgejo/workflows` left
-    the two token-in-argv fixes in this same change silently revertible.
+    Reviewers found that omitting the workflow directory left token-in-argv
+    fixes there silently revertible.
     """
     scanned = {p.name for p in scan_files()}
-    assert {"lint-unit.yml", "integration.yml"} <= scanned, scanned
+    assert "ci.yml" in scanned, scanned
 
 
 def test_reverting_the_workflow_fix_is_caught():
