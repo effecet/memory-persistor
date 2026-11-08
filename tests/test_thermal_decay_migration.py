@@ -241,3 +241,58 @@ def test_returned_columns_match_what_decay_all_reads():
         assert re.search(rf"^\s+{col}\s+\w", sql, re.M), (
             f"RETURNS TABLE is missing the {col} column decayAll reads"
         )
+
+
+INITDB_CRON = REPO / "initdb" / "01-pg-cron.sql"
+
+
+def _decay_catchup_body() -> str:
+    sql = INITDB_CRON.read_text()
+    m = re.search(
+        r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.decay_catchup\(\).*?\$func\$(.*?)\$func\$",
+        sql,
+        re.S | re.I,
+    )
+    assert m, "decay_catchup() not found in initdb/01-pg-cron.sql"
+    return _strip_sql_comments(m.group(1))
+
+
+def test_decay_catchup_delegates_and_keeps_no_second_copy():
+    """The startup catch-up runs the versioned function, not a frozen copy.
+
+    It used to inline the v3 query with fixed 0.7/0.3 tier thresholds, so
+    after a long outage local Docker re-tiered on absolute cutoffs while the
+    nightly job used cume_dist."""
+    body = _decay_catchup_body()
+    # The call site, not the name: the name also appears in the
+    # to_regprocedure guard and the NOTICE text.
+    call = re.search(r"\bFROM\s+public\.memory_thermal_decay\(\)", body)
+    assert call, "decay_catchup no longer calls public.memory_thermal_decay()"
+    # Before `make migrate` the function does not exist yet; without the guard
+    # the @reboot catch-up on a fresh container would raise instead of skip.
+    guard = re.search(
+        r"to_regprocedure\('public\.memory_thermal_decay\(\)'\)\s+IS\s+NULL", body, re.I
+    )
+    assert guard, "decay_catchup lost its missing-function guard"
+    assert guard.start() < call.start(), "the missing-function guard must run before the call"
+    assert "WITH decay_rates AS" not in body, (
+        "a hand-written copy of the decay CTE is back in decay_catchup"
+    )
+    assert not re.search(r">\s*0\.[37]\b", body), (
+        "decay_catchup hard-codes a tier threshold"
+    )
+
+
+def test_thermal_cutoffs_single_row_check_matches_migration():
+    """schema.ts declares the CHECK 0012 created, under the name Postgres gave
+    it (`<table>_<column>_check` for an inline column CHECK), so the schema and
+    the database agree that thermal_cutoffs holds a single row."""
+    schema = (REPO / "src" / "schema.ts").read_text()
+    assert re.search(
+        r"check\('thermal_cutoffs_id_check',\s*sql`\$\{table\.id\} = 1`\)", schema
+    ), "src/schema.ts lost the thermal_cutoffs single-row CHECK"
+    (mig,) = (REPO / "drizzle").glob("0012_*.sql")
+    assert re.search(r"\bid\s+smallint\b[^,\n]*\bCHECK\s*\(\s*id\s*=\s*1\s*\)", mig.read_text(), re.I), (
+        "0012 no longer declares the inline CHECK (id = 1) the schema name relies on"
+    )
+

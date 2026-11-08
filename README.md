@@ -309,14 +309,19 @@ and reproducible — `make cron-verify` asserts the live job still matches the
 committed migration, and `tests/test_thermal_decay_migration.py` finds the last
 defining migration and fails if a constant in `src/config.ts` moves without the SQL.
 
-> **Local Docker has two other inline copies of the decay SQL.**
+> **Local Docker has one other inline copy of the decay SQL.**
 > `initdb/01-pg-cron.sql` runs at container init, *before* any migration, so it
 > seeds `memory-thermal-decay` with its own inline CTE; applying `0010`
 > afterwards unschedules and replaces it, so the function wins on any container
-> where migrations ran. Its `decay_catchup()` (`@reboot` catch-up) keeps a
-> separate inline copy that `0010` does **not** replace. If you change the decay
-> maths, change `initdb/01-pg-cron.sql` too — the migration guard does not cover
-> it. A managed instance is unaffected: it never runs `initdb/`.
+> where migrations ran. On one where they never did, that CTE is what runs, and
+> no test keeps it in step with the function. Its `decay_catchup()` (`@reboot`
+> catch-up) calls `public.memory_thermal_decay()` and skips until `make migrate`
+> has created it;
+> `tests/test_thermal_decay_migration.py` fails if an inline copy comes back.
+> initdb runs only on an empty data volume, so an existing container keeps its
+> old `decay_catchup()` until you re-run that file's `CREATE OR REPLACE FUNCTION
+> public.decay_catchup()` block. A managed instance is unaffected: it never runs
+> `initdb/`.
 
 `decayAll()` in `src/thermal.ts` calls that same function and then does the
 markdown half, which SQL structurally cannot: Postgres has no access to any

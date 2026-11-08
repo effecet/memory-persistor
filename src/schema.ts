@@ -67,7 +67,11 @@ export const thermalCutoffs = pgTable('thermal_cutoffs', {
   warmCutoff: real('warm_cutoff').notNull(),
   corpusSize: integer('corpus_size').notNull().default(0),
   computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  // Single-row table (drizzle/0012). The name is the one Postgres gave 0012's
+  // inline column CHECK, so schema and database agree.
+  check('thermal_cutoffs_id_check', sql`${table.id} = 1`),
+]);
 
 // ── Memory versions (audit trail) ──────────────────────────────────────────
 

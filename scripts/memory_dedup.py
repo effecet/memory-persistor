@@ -44,7 +44,10 @@ from psql_dsn import psql_env  # noqa: E402  (path-insert must precede import)
 
 APPLY = "--apply" in sys.argv
 HOME = Path.home()
-CLAUDE = HOME / ".claude"
+# Where the MCP's file-sync writes: src/config.ts uses
+# `process.env.CLAUDE_DIR || ${HOME}/.claude`. This script deletes the files the
+# MCP wrote, so it follows the same override, and an empty CLAUDE_DIR falls back.
+CLAUDE = Path(os.environ.get("CLAUDE_DIR") or HOME / ".claude")
 
 def encode(source: str) -> str:
     return source.replace("/", "-").replace(".", "-")
