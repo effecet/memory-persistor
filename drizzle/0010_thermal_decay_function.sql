@@ -15,15 +15,13 @@
 --      run. Applying this migration afterwards unschedules and replaces it, so
 --      the function wins — but on a container where 0010 was never applied, the
 --      inline copy is what runs.
---   2. `public.decay_catchup()` in the same file mirrors the decay SQL inline
---      for its `@reboot` catch-up pass and is NOT replaced by this migration.
---      It still assigns tiers from the fixed 0.7 / 0.3 thresholds, so after a
---      container restart following a gap of more than 24h it overwrites the
---      percentile tiers (0013+) until the next scheduled decay.
+--   2. (Resolved: `public.decay_catchup()` in the same file used to mirror
+--      the decay SQL inline with fixed 0.7 / 0.3 tier thresholds. It now calls
+--      this function, and tests/test_thermal_decay_migration.py fails if an
+--      inline copy comes back.)
 -- `scripts/memory-decay.py` (`make decay`) calls this function and keeps no
 -- copy of its own. tests/test_thermal_decay_migration.py pins the LAST
--- migration that defines the function against src/config.ts, so a change to
--- the decay maths must still be applied to initdb/01-pg-cron.sql by hand.
+-- migration that defines the function against src/config.ts.
 --
 -- Constants below are duplicated from src/config.ts and pinned by
 -- tests/test_thermal_decay_migration.py. Note that 0.1 encodes

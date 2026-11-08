@@ -457,3 +457,37 @@ class TestTsSlugDrift:
         body = enc_m.group(1)
         assert "/\\//g" in body, "slash→dash step drifted"
         assert "/\\./g" in body, "dot→dash step missing — the documented orphan bug"
+
+
+class TestClaudeDir:
+    """memory_dedup mirrors file-sync.ts, which writes under CLAUDE_DIR
+    (src/config.ts: `process.env.CLAUDE_DIR || ${HOME}/.claude`), so it must
+    read and delete under the same dir."""
+
+    @pytest.fixture
+    def reloaded(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        import importlib
+
+        monkeypatch.setenv("CLAUDE_DIR", str(tmp_path))
+        yield importlib.reload(md)
+        # Restore the caller's env (CLAUDE_DIR may have been set) BEFORE the
+        # reload, so the module rebinds to what it was before this test.
+        monkeypatch.undo()
+        importlib.reload(md)
+
+    def test_module_paths_follow_claude_dir(self, reloaded, tmp_path: Path) -> None:
+        # The module-level binding is what --apply deletes under.
+        assert reloaded.CLAUDE == tmp_path
+        assert reloaded.MEMDIR.is_relative_to(tmp_path)
+
+    def test_empty_claude_dir_falls_back_to_home(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        # `||` in config.ts treats "" as unset, so the script must too.
+        import importlib
+
+        monkeypatch.setenv("CLAUDE_DIR", "")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        try:
+            assert importlib.reload(md).CLAUDE == tmp_path / ".claude"
+        finally:
+            monkeypatch.undo()
+            importlib.reload(md)
