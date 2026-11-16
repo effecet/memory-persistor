@@ -88,22 +88,44 @@ def dump_entities() -> list[dict]:
         sys.exit(f"psql failed: {out.stderr.strip()}")
     return json.loads(out.stdout.strip())
 
-def read_fm(p: Path) -> dict:
+def read_fm(p: Path, strict: bool = False) -> dict:
     """Scoped frontmatter field reader — mirrors src/file-sync.ts ::
     readFrontmatterField. Matching is confined to the `---...---` block (or
     the first 800 chars when no fence is found), so a same-named key in the
     BODY (e.g. a memory documenting `tier: HOT` as prose) is never picked up.
     Values have surrounding quotes stripped, so `tier: "HOT"` parses the same
     as `tier: HOT`.
+
+    `strict=True` is for paths that DELETE on the result (main()'s T1/T2), like
+    readFrontmatterField's `{ strict: true }`: a real `---` block is required
+    (LF or CRLF), only top-level keys count, and there is no 800-char fallback,
+    so a body line or another key's nested `pg_id` never selects a file. When
+    in doubt every field is None and the file lands in T4_REVIEW, untouched.
+
+    `pgid` is lower-cased here, once, because Postgres returns uuids
+    lower-case: every by-id lookup then matches a hand-edited upper-case pg_id.
+    file-sync.ts instead returns the raw value and lower-cases where it
+    compares (validPgIds, updateMemoryIndex, findFilesByPgId). Either way,
+    both sides of every comparison are lower-case.
     """
     t = p.read_text(errors="replace")
-    m = re.match(r"^---\n(.*?)\n---", t, re.S)
-    blk = m.group(1) if m else t[:800]
-    def g(k):
-        mm = re.search(rf"^\s*{k}\s*:\s*(.+)$", blk, re.M)
-        return mm.group(1).strip().strip('"').strip("'") if mm else None
+    if strict:
+        # `??` tries an EMPTY block first, so `---\n---` closes on line 2; the
+        # closing fence must be a whole line, so `---foo` does not close it.
+        m = re.match(r"﻿?\s*---\r?\n((?:.*?\r?\n)??)---[ \t]*(?:\r?\n|$)", t, re.S)
+        blk = m.group(1) if m else ""
+        key_re = r"^{k}:[ \t]*(.+?)\r?$"  # colon right after the key, as in TS
+    else:
+        m = re.match(r"^---\n(.*?)\n---", t, re.S)
+        blk = m.group(1) if m else t[:800]
+        key_re = r"^\s*{k}\s*:\s*(.+)$"
+
+    def g(k: str) -> str | None:
+        mm = re.search(key_re.format(k=k), blk, re.M)
+        return (mm.group(1).strip().strip('"').strip("'") or None) if mm else None
+    pgid = g("pg_id")
     return {
-        "pgid": g("pg_id"), "name": g("name"), "type": g("type"),
+        "pgid": pgid.lower() if pgid else pgid, "name": g("name"), "type": g("type"),
         "tier": g("tier"), "temperature": g("temperature"),
     }
 
@@ -161,6 +183,28 @@ def home_has_file(e: dict) -> str | None:
 _FETCH = object()   # sentinel: "resolve the map yourself"
 
 
+# A pg_id must be a real 8-4-4-4-12 uuid before it joins the batch: one id that
+# passes a looser [0-9a-fA-F-]{36} filter but fails Postgres's ::uuid cast (36 hex
+# chars, no dashes) fails the WHOLE ::uuid[] batch, and every memory silently
+# falls back to frontmatter ranking. Ids come back lower-cased because Postgres
+# returns uuids lower-case and the lookup below uses the same form, so a
+# hand-edited upper-case id still resolves. Must match UUID_RE / validPgIds in
+# src/file-sync.ts.
+UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def valid_pg_ids(pg_ids: list[str]) -> list[str]:
+    """Keep only well-formed uuids, lower-cased; report the rest on stderr
+    (they need repair)."""
+    ok = [i.lower() for i in pg_ids if UUID_RE.fullmatch(i)]
+    bad = len(pg_ids) - len(ok)
+    if bad:
+        print(f"[memory_dedup] skipped {bad} malformed pg_id(s)", file=sys.stderr)
+    return ok
+
+
 def fetch_thermal_by_pgid(
     pg_ids: list[str], timeout: int = 30, url: str | None = None
 ) -> dict[str, tuple[str, float]] | None:
@@ -187,7 +231,7 @@ def fetch_thermal_by_pgid(
 
     Must match src/file-sync.ts :: fetchThermalByPgId.
     """
-    ids = ",".join(i for i in pg_ids if re.fullmatch(r"[0-9a-fA-F-]{36}", i))
+    ids = ",".join(valid_pg_ids(pg_ids))
     if not ids:
         return None
     try:
@@ -197,7 +241,7 @@ def fetch_thermal_by_pgid(
         return None
     # Nothing is interpolated into the SQL: the id list travels as a psql
     # variable, so psql owns the quoting and the ::uuid[] cast makes Postgres
-    # reject anything that is not a uuid. The regex above is a second gate.
+    # reject anything that is not a uuid. valid_pg_ids() is the gate before it.
     #
     # The query goes in on STDIN, not via -c: psql only performs :'var'
     # interpolation on lexed input, and -c is sent verbatim (verified 2026-08-16
@@ -287,7 +331,8 @@ def regen_index(thermal: object = _FETCH) -> int:
     if resolved is not None:
         orphans = 0
         for e in entries:
-            row = resolved.get(e["pgid"]) if e["pgid"] else None
+            # Defensive: read_fm is the normalisation point and already lower-cases.
+            row = resolved.get(str(e["pgid"]).lower()) if e["pgid"] else None
             if row:
                 e["rank"] = TIER_RANK.get(row[0].upper(), UNKNOWN_TIER_RANK)
                 e["temp"] = row[1]
@@ -334,8 +379,9 @@ def main():
     present = {p.name for p in files}
     tiers = defaultdict(list)
     for f in files:
-        fi = read_fm(f)
-        ent = by_id.get(fi["pgid"]) if fi["pgid"] else None
+        # strict: T1/T2 below are deleted under --apply.
+        fi = read_fm(f, strict=True)
+        ent = by_id.get(fi["pgid"]) if fi["pgid"] else None  # read_fm lower-cases
         if fi["pgid"] and ent is None:
             tiers["T4_REVIEW"].append((f.name, f"dangling pg_id {fi['pgid'][:8]}")); continue
         if ent is None:

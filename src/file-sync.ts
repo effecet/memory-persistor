@@ -436,15 +436,20 @@ export async function syncToFile(
  * is the only stable cross-rename anchor, so we glob the dir and read
  * frontmatter to surface every file pointing at this entity.
  *
- * Frontmatter-only match: the regex is anchored to a line so a `pg_id`
- * mention in the body cannot trigger a false delete.
+ * Reads pg_id with readFrontmatterField in strict mode: only a TOP-LEVEL key
+ * inside a real `---` block (LF or CRLF) counts, so a body line, a file with
+ * no frontmatter, or another key's nested `pg_id` can never trigger a delete.
+ * The value is compared case-insensitively: Postgres returns uuids
+ * lower-case, so a hand-edited upper-case pg_id is the same entity.
  */
 function findFilesByPgId(dir: string, pgId: string): string[] {
-  if (!existsSync(dir)) {
+  const want = pgId.trim().toLowerCase();
+  // An empty id would equal the '' readFrontmatterField returns for every
+  // file WITHOUT a pg_id, and the caller deletes what this returns.
+  if (!want || !existsSync(dir)) {
     return [];
   }
   const matches: string[] = [];
-  const pattern = new RegExp(`^pg_id:[ \\t]*${pgId}\\s*$`, 'm');
   for (const file of readdirSync(dir)) {
     if (!file.endsWith('.md') || file === 'MEMORY.md') {
       continue;
@@ -452,7 +457,7 @@ function findFilesByPgId(dir: string, pgId: string): string[] {
     const fullPath = join(dir, file);
     try {
       const content = readFileSync(fullPath, 'utf-8');
-      if (pattern.test(content)) {
+      if (readFrontmatterField(content, 'pg_id', { strict: true }).toLowerCase() === want) {
         matches.push(fullPath);
       }
     } catch {
@@ -543,7 +548,24 @@ export async function syncMerge(
  *
  * @internal — exported for tests; not part of the MCP surface.
  */
-export function readFrontmatterField(content: string, key: string): string {
+export function readFrontmatterField(
+  content: string,
+  key: string,
+  { strict = false }: { strict?: boolean } = {},
+): string {
+  // strict (for paths that DELETE on a match): a real `---` block is required
+  // (LF or CRLF), and only a top-level key counts. No first-800-chars
+  // fallback and no nested fallback, so a body line or another key's nested
+  // field can never select a file. When in doubt the file is kept.
+  if (strict) {
+    // `??` tries an EMPTY block first, so `---\n---` closes on line 2 instead
+    // of running on to a later `---` rule in the body; the closing fence must
+    // be a whole line, so `---foo` does not close the block.
+    const block = content.match(/^\uFEFF?\s*---\r?\n((?:[\s\S]*?\r?\n)??)---[ \t]*(?:\r?\n|$)/)?.[1];
+    if (block === undefined) return '';
+    const flat = block.match(new RegExp(`^${key}:[ \\t]*(.*)$`, 'm'));
+    return (flat?.[1] ?? '').trim().replace(/^["']|["']$/g, '');
+  }
   const block = content.match(/^\uFEFF?\s*---\n([\s\S]*?)\n---/)?.[1] ?? content.slice(0, 800);
   const flat = block.match(new RegExp(`^${key}:[ \\t]*(.*)$`, 'm'));
   const nested = flat ? null : block.match(new RegExp(`^[ \\t]+${key}:[ \\t]*(.*)$`, 'm'));
@@ -553,6 +575,25 @@ export function readFrontmatterField(content: string, key: string): string {
 
 export type ThermalRow = { tier: string; temperature: number };
 export type ThermalMap = Map<string, ThermalRow>;
+
+/**
+ * A pg_id must be a real 8-4-4-4-12 uuid before it joins the batch: one id that
+ * passes a looser `[0-9a-fA-F-]{36}` filter but fails Postgres's `::uuid` cast
+ * (36 hex chars, no dashes) fails the WHOLE `::uuid[]` batch, and every memory
+ * silently falls back to frontmatter ranking. Ids come back lower-cased because
+ * Postgres returns uuids lower-case and the index lookup uses the same form, so
+ * a hand-edited upper-case id still resolves. Must match `UUID_RE` /
+ * `valid_pg_ids` in scripts/memory_dedup.py.
+ */
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/** Keep only well-formed uuids, lower-cased; report the rest on stderr (they need repair). */
+export function validPgIds(pgIds: string[]): string[] {
+  const ok = pgIds.filter(id => UUID_RE.test(id)).map(id => id.toLowerCase());
+  const bad = pgIds.length - ok.length;
+  if (bad > 0) process.stderr.write(`[file-sync] skipped ${bad} malformed pg_id(s)\n`);
+  return ok;
+}
 
 /**
  * Batch-resolve live thermal state for the entities an index rebuild is about
@@ -574,7 +615,7 @@ export type ThermalMap = Map<string, ThermalRow>;
  * then never exit.
  */
 export async function fetchThermalByPgId(pgIds: string[]): Promise<ThermalMap | null> {
-  const ids = pgIds.filter(id => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id));
+  const ids = validPgIds(pgIds);
   if (ids.length === 0) return null;
   try {
     // db.js MUST be imported before the DATABASE_URL check: importing it is what
@@ -686,7 +727,7 @@ export async function updateMemoryIndex(
   if (resolved) {
     let orphans = 0;
     for (const e of entries) {
-      const row = e.pgId ? resolved.get(e.pgId) : undefined;
+      const row = e.pgId ? resolved.get(e.pgId.toLowerCase()) : undefined;
       if (row) {
         const t = row.tier.toUpperCase();
         e.rank = t in TIER_RANK ? TIER_RANK[t] : UNKNOWN_TIER_RANK;

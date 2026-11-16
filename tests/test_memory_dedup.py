@@ -128,6 +128,39 @@ class TestReadFm:
         assert fm["name"] == "No Id"
         assert fm["type"] == "project"
 
+    def test_pgid_is_lower_cased_but_other_fields_are_not(self, tmp_path):
+        p = tmp_path / "feedback_z.md"
+        p.write_text("---\nname: Mixed\ntype: feedback\ntier: HOT\npg_id: ABCDEF01-2222\n---\nb", "utf-8")
+        fm = md.read_fm(p)
+        assert (fm["pgid"], fm["name"], fm["tier"]) == ("abcdef01-2222", "Mixed", "HOT")
+
+    @pytest.mark.parametrize(
+        ("label", "text", "want"),
+        [
+            ("top-level LF", "---\nname: N\npg_id: AB-1\n---\nb", "ab-1"),
+            ("top-level CRLF", "---\r\nname: N\r\npg_id: AB-1\r\n---\r\nb", "ab-1"),
+            ("quoted", '---\npg_id: "AB-1"\n---\nb', "ab-1"),
+            ("BOM", "\ufeff---\npg_id: ab-1\n---\nb", "ab-1"),
+            ("no fence, id in body", "notes\npg_id: ab-1\n", None),
+            ("nested key only", "---\nrelated:\n  pg_id: ab-1\n---\nb", None),
+            ("body after empty block", "---\n---\npg_id: ab-1\n", None),
+            ("---foo does not close", "---\nname: N\n---foo\npg_id: ab-1\n---\nb", "ab-1"),
+            ("never closed", "---\nname: N\n---foo\npg_id: ab-1\n", None),
+            ("space before colon", "---\npg_id : ab-1\n---\nb", None),
+            ("empty value", "---\npg_id: \"\"\n---\nb", None),
+        ],
+    )
+    def test_strict_reads_only_a_top_level_key_in_a_real_block(self, tmp_path, label, text, want):
+        p = tmp_path / "f.md"
+        p.write_bytes(text.encode())
+        assert md.read_fm(p, strict=True)["pgid"] == want, label
+
+    def test_strict_nested_id_does_not_shadow_the_top_level_one(self, tmp_path):
+        p = tmp_path / "f.md"
+        p.write_text("---\nrelated:\n  pg_id: aaaa\npg_id: BBBB\n---\nb", "utf-8")
+        assert md.read_fm(p, strict=True)["pgid"] == "bbbb"
+        assert md.read_fm(p)["pgid"] == "aaaa"  # lenient (index ranking) is unchanged
+
 
 # --------------------------------------------------------------------------- #
 # Index line budget — degradation when the memory dir grows past the cap
@@ -208,6 +241,29 @@ class TestIndexBudget:
         assert "- reference: n0 — d-n0\n" not in out
         assert "- reference: n168 — d-n168" in out
 
+    def test_uppercase_pgid_resolves_against_lowercase_row(self, tmp_path, monkeypatch):
+        """Postgres returns uuids lower-case; a hand-edited upper-case pg_id must
+        still find its row, not rank as an orphan at 0 and fall off the index."""
+        monkeypatch.setattr(md, "MEMDIR", tmp_path)
+        for i in range(169):
+            pg_id = f"00000000-0000-4000-8000-{i:012d}"
+            if i == 0:
+                pg_id = f"0000000A-0000-4000-8000-{i:012d}"
+            (tmp_path / f"z-{i:03d}.md").write_text(
+                f"---\nname: n{i}\ndescription: d-n{i}\ntype: reference\n"
+                f"temperature: 1\ntier: HOT\npg_id: {pg_id}\n---\n\nbody\n"
+            )
+        thermal = {
+            f"00000000-0000-4000-8000-{i:012d}": ("HOT", 0.5 + i / 1000)
+            for i in range(1, 169)
+        }
+        thermal["0000000a-0000-4000-8000-000000000000"] = ("HOT", 0.99)
+        md.regen_index(thermal=thermal)
+
+        out = (tmp_path / "MEMORY.md").read_text()
+        assert "- reference: n0 — d-n0\n" in out
+        assert "- reference: n1 — d-n1\n" not in out
+
     def test_falls_back_to_frontmatter_when_thermal_is_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr(md, "MEMDIR", tmp_path)
         (tmp_path / "a.md").write_text(
@@ -224,6 +280,20 @@ class TestIndexBudget:
         the index on filename alone. Must match src/file-sync.ts.
         """
         assert md.fetch_thermal_by_pgid([]) is None
+
+    def test_valid_pg_ids_rejects_dashless_hex_and_reports_it(self, capsys):
+        """36 hex chars with no dashes passes a loose [0-9a-fA-F-]{36} filter but
+        fails Postgres's ::uuid cast, which would fail the WHOLE batch."""
+        good = "abcdef00-0000-4000-8000-000000000001"  # letters, so upper() differs
+        bad = ["a" * 36, "-" * 36, "x" + good, good + "0"]  # last two: anchoring
+        assert md.valid_pg_ids([good, *bad, good.upper()]) == [good, good]
+        assert "skipped 4 malformed pg_id(s)" in capsys.readouterr().err
+
+    def test_fetch_thermal_skips_db_when_every_id_is_malformed(self, monkeypatch):
+        def no_psql(*a, **k):
+            raise AssertionError("psql must not run for an all-malformed batch")
+        monkeypatch.setattr(md.subprocess, "run", no_psql)
+        assert md.fetch_thermal_by_pgid(["a" * 36], url="postgresql://u@h/db") is None
 
     def test_drops_cold_before_warm(self, tmp_path, monkeypatch):
         monkeypatch.setattr(md, "MEMDIR", tmp_path)
@@ -399,6 +469,39 @@ def test_report_mode_touches_nothing(reconcile_env, monkeypatch, capsys):
     assert "T3_RENAME: 1" in out
     assert "T4_REVIEW: 2" in out
     assert "KEEP: 2" in out
+
+
+def test_uppercase_pgid_is_not_t4_dangling(reconcile_env, monkeypatch, capsys):
+    """A hand-edited upper-case pg_id of a live entity must resolve (Postgres
+    returns uuids lower-case), not land in T4_REVIEW as dangling."""
+    monkeypatch.setattr(md, "APPLY", False)
+    memdir = reconcile_env["memdir"]
+    e_keep = reconcile_env["entities"][0]
+    # The fixture ids are all digits, so swap in a letter to give upper() a
+    # case to change; the entity row keeps it lower-case, as Postgres returns it.
+    upper = e_keep["id"].replace("1", "A", 1).upper()
+    e_keep["id"] = upper.lower()
+    _fm_file(memdir / "feedback_keep-me.md", name="Keep Me", etype="feedback", pgid=upper)
+    md.main()
+    out = capsys.readouterr().out
+    assert "KEEP: 2" in out
+    assert "T4_REVIEW: 2" in out  # only the fixture's own two
+
+
+def test_apply_never_deletes_on_a_body_or_nested_pg_id(reconcile_env, monkeypatch, capsys):
+    """--apply deletes T1/T2, so classification reads pg_id strictly: a file
+    that only MENTIONS a live id (no fence, or a nested key) is T4, kept."""
+    monkeypatch.setattr(md, "APPLY", True)
+    memdir = reconcile_env["memdir"]
+    dup_id = reconcile_env["entities"][1]["id"].upper()
+    (memdir / "notes_nofence.md").write_text(f"notes\npg_id: {dup_id}\nname: Dup Entity\n", "utf-8")
+    (memdir / "notes_nested.md").write_text(
+        f"---\nrelated:\n  pg_id: {dup_id}\n  name: Dup Entity\n---\nb\n", "utf-8"
+    )
+    md.main()
+    present = {p.name for p in memdir.glob("*.md")}
+    assert {"notes_nofence.md", "notes_nested.md"} <= present
+    assert "T4_REVIEW: 4" in capsys.readouterr().out
 
 
 def test_apply_deletes_only_t1_t2_regenerates_t3_keeps_t4(reconcile_env, monkeypatch):
