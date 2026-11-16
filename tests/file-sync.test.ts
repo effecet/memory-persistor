@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   existsSync,
   mkdirSync,
@@ -17,6 +17,7 @@ import {
   truncateDescription,
   updateMemoryIndex,
   fetchThermalByPgId,
+  validPgIds,
   syncToFile,
   removeFile,
   syncMerge,
@@ -516,6 +517,54 @@ describe('updateMemoryIndex', () => {
     // orphan and re-cut the index on filename alone.
     expect(await fetchThermalByPgId([])).toBeNull();
   });
+
+  it('validPgIds drops ids that would fail the ::uuid cast and fail the whole batch', () => {
+    const good = 'abcdef00-0000-4000-8000-000000000001'; // letters, so upper-casing differs
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      // The last two bad ids embed a valid uuid: they pin the ^...$ anchoring.
+      const bad = ['a'.repeat(36), '-'.repeat(36), `x${good}`, `${good}0`];
+      expect(validPgIds([good, ...bad, good.toUpperCase()])).toEqual([good, good]);
+      expect(write).toHaveBeenCalledWith('[file-sync] skipped 4 malformed pg_id(s)\n');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('fetchThermalByPgId filters through validPgIds before any DB work', async () => {
+    // The return is null with or without the filter in a test env, so the
+    // helper's stderr report is what tells a bypass apart.
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      expect(await fetchThermalByPgId(['a'.repeat(36)])).toBeNull();
+      expect(write).toHaveBeenCalledWith('[file-sync] skipped 1 malformed pg_id(s)\n');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('an upper-case pg_id resolves against the lower-case row Postgres returns', async () => {
+    const dir = makeTmpDir();
+    try {
+      const upper = '0000000A-0000-4000-8000-000000000001';
+      writeFileSync(
+        join(dir, 'a.md'),
+        `---\nname: a\ndescription: da\ntype: reference\ntier: COLD\ntemperature: 0\npg_id: ${upper}\n---\nbody\n`,
+        'utf-8',
+      );
+      const thermal = new Map([[upper.toLowerCase(), { tier: 'HOT', temperature: 0.9 }]]);
+      const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        await updateMemoryIndex(dir, thermal);
+        // A missed lookup is reported on stderr as an orphan; a resolved row is not.
+        expect(err.mock.calls.some(c => String(c[0]).includes('no matching entity'))).toBe(false);
+      } finally {
+        err.mockRestore();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('removeFile pg_id glob', () => {
@@ -679,6 +728,90 @@ describe('removeFile pg_id glob', () => {
     }
   });
 
+  it('deletes an orphan whose pg_id differs only by case, and nothing else', async () => {
+    const { source, dir, projectDir } = makeIsolatedSource();
+    try {
+      const pgId = 'abcdef01-1111-4111-8111-111111111111';
+      await syncToFile({
+        id: pgId, name: 'cased', type: 'fact', observations: 'b', source,
+        temperature: 0.5, tier: 'WARM',
+      });
+      const upperOrphan = join(dir, 'fact_cased-old.md');
+      writeFileSync(upperOrphan, frontmatter('cased-old', 'fact', pgId.toUpperCase()), 'utf-8');
+      // A longer id that merely STARTS with this one must not match.
+      const prefixBystander = join(dir, 'fact_prefix.md');
+      writeFileSync(prefixBystander, frontmatter('prefix', 'fact', `${pgId}0`), 'utf-8');
+      // The id appearing only in the BODY must not match either.
+      const bodyBystander = join(dir, 'fact_mentions.md');
+      writeFileSync(
+        bodyBystander,
+        frontmatter('mentions', 'fact', '22222222-2222-4222-8222-222222222222', `pg_id: ${pgId}`),
+        'utf-8',
+      );
+      // A file with no pg_id at all must survive too.
+      const noIdBystander = join(dir, 'fact_noid.md');
+      writeFileSync(noIdBystander, '---\nname: noid\ntype: fact\n---\n\nbody\n', 'utf-8');
+      // Delete-path shapes a lenient reader would match. Each mentions the id
+      // OUTSIDE a top-level frontmatter key, so each must survive:
+      const crlfBody = join(dir, 'fact_crlf-body.md');   // CRLF: fence must still be found
+      writeFileSync(crlfBody, `---\r\nname: crlf\r\ntype: fact\r\n---\r\n\r\npg_id: ${pgId}\r\n`, 'utf-8');
+      const noFence = join(dir, 'fact_nofence.md');      // no frontmatter: nothing to read
+      writeFileSync(noFence, `just notes\npg_id: ${pgId}\n`, 'utf-8');
+      const nested = join(dir, 'fact_nested.md');        // nested under another key
+      writeFileSync(nested, `---\nname: nested\ntype: fact\nrelated:\n  pg_id: ${pgId}\n---\n\nb\n`, 'utf-8');
+      const emptyFm = join(dir, 'fact_emptyfm.md');      // empty frontmatter, then a body rule
+      writeFileSync(emptyFm, `---\n---\npg_id: ${pgId}\n---\nmore\n`, 'utf-8');
+      // ...while a CRLF file whose TOP-LEVEL pg_id is the entity's goes with it.
+      const crlfOrphan = join(dir, 'fact_crlf-orphan.md');
+      writeFileSync(crlfOrphan, `---\r\nname: crlf-old\r\ntype: fact\r\npg_id: ${pgId.toUpperCase()}\r\n---\r\n\r\nb\r\n`, 'utf-8');
+      // `---foo` is not a closing fence: never closed, the file is kept...
+      const notClosed = join(dir, 'fact_not-closed.md');
+      writeFileSync(notClosed, `---\nname: nc\n---foo\npg_id: ${pgId}\n`, 'utf-8');
+      // ...and with a real fence after it, the pg_id is a top-level key: swept.
+      const closedLater = join(dir, 'fact_closed-later.md');
+      writeFileSync(closedLater, `---\nname: cl\n---foo\npg_id: ${pgId}\n---\nb\n`, 'utf-8');
+      // Quoted value, BOM and stray spaces: same entity, swept with it.
+      const quotedOrphan = join(dir, 'fact_quoted-orphan.md');
+      writeFileSync(quotedOrphan, `\uFEFF---\nname: q\ntype: fact\npg_id: "${pgId}"  \n---\n\nb\n`, 'utf-8');
+
+      await removeFile({
+        id: pgId, name: 'cased', type: 'fact', observations: 'b', source,
+        temperature: 0.5, tier: 'WARM',
+      });
+
+      expect(existsSync(join(dir, 'fact_cased.md'))).toBe(false);
+      expect(existsSync(upperOrphan)).toBe(false);
+      expect(existsSync(prefixBystander)).toBe(true);
+      expect(existsSync(bodyBystander)).toBe(true);
+      expect(existsSync(noIdBystander)).toBe(true);
+      expect(existsSync(crlfBody)).toBe(true);
+      expect(existsSync(noFence)).toBe(true);
+      expect(existsSync(nested)).toBe(true);
+      expect(existsSync(emptyFm)).toBe(true);
+      expect(existsSync(crlfOrphan)).toBe(false);
+      expect(existsSync(notClosed)).toBe(true);
+      expect(existsSync(closedLater)).toBe(false);
+      expect(existsSync(quotedOrphan)).toBe(false);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it('an empty id never sweeps the files that have no pg_id', async () => {
+    const { source, dir, projectDir } = makeIsolatedSource();
+    try {
+      const noIdFile = join(dir, 'fact_noid.md');
+      writeFileSync(noIdFile, '---\nname: noid\ntype: fact\n---\n\nbody\n', 'utf-8');
+      await removeFile({
+        id: '', name: 'something-else', type: 'fact', observations: 'b', source,
+        temperature: 0.5, tier: 'WARM',
+      });
+      expect(existsSync(noIdFile)).toBe(true);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it('syncToFile removes stale same-pg_id files left by a rename', async () => {
     const { source, dir, projectDir } = makeIsolatedSource();
     try {
@@ -688,6 +821,9 @@ describe('removeFile pg_id glob', () => {
       // Pre-existing file under the OLD slug, same entity.
       const orphanPath = join(dir, 'fact_old-name.md');
       writeFileSync(orphanPath, frontmatter('old-name', 'fact', pgId, 'stale'), 'utf-8');
+      // A second stale copy whose pg_id was hand-edited to upper case.
+      const upperOrphanPath = join(dir, 'fact_older-name.md');
+      writeFileSync(upperOrphanPath, frontmatter('older-name', 'fact', pgId.toUpperCase(), 'stale'), 'utf-8');
 
       // Bystander with a different pg_id — must survive.
       const bystanderPath = join(dir, 'fact_unrelated.md');
@@ -706,6 +842,7 @@ describe('removeFile pg_id glob', () => {
 
       expect(existsSync(join(dir, 'fact_new-name.md'))).toBe(true);
       expect(existsSync(orphanPath)).toBe(false);
+      expect(existsSync(upperOrphanPath)).toBe(false);
       expect(existsSync(bystanderPath)).toBe(true);
 
       // Exactly one file on disk carries this entity's pg_id.
